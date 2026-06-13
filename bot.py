@@ -1294,75 +1294,143 @@ async def on_guild_join(guild):
     except Exception as e:
         print(f"[ERRO] on_guild_join: {e}", flush=True)
 
-def _extrair_guild_id_e_nome(content: str):
+def _extrair_guild_id_e_nome(message):
     """
-    Tenta extrair um guild_id (17-19 digitos) e um nome de servidor do conteudo
-    de uma mensagem. Retorna (guild_id: int, guild_nome: str | None).
+    Extrai guild_id (17-19 digitos) e nome do servidor da mensagem,
+    verificando tanto message.content quanto os embeds (description e fields).
+    Retorna (guild_id: int, guild_nome: str | None).
     """
     import re
-    match = re.search(r"\b(\d{17,19})\b", content)
+
+    # Junta todo o texto disponivel na mensagem (content + embeds)
+    partes = [message.content or ""]
+    for emb in message.embeds:
+        if emb.description:
+            partes.append(emb.description)
+        for field in emb.fields:
+            partes.append(field.name or "")
+            partes.append(field.value or "")
+        if emb.footer and emb.footer.text:
+            partes.append(emb.footer.text)
+        if emb.title:
+            partes.append(emb.title)
+    texto_total = " ".join(partes)
+
+    match = re.search(r"\b(\d{17,19})\b", texto_total)
     if not match:
         return None, None
+
     guild_id = int(match.group(1))
-    nome = content[:match.start()].strip() + content[match.end():].strip()
-    nome = re.sub(r"[^\w\s\-]", " ", nome).strip()
+    # O nome e o texto sem o ID, limpo de caracteres especiais
+    resto = texto_total[:match.start()].strip() + " " + texto_total[match.end():].strip()
+    nome = re.sub(r"[^\w\s\-]", " ", resto).strip()
     return guild_id, nome or None
 
 
 async def _handle_deactivate_request(message):
     """
     Processa um pedido de desativacao vindo do bot autorizado (DEACTIVATE_BOT_ID).
-    Desativa o servidor, avisa o dono do servidor na DM e notifica o BOT_OWNER_ID.
+    1. Encaminha a mensagem original ao dono do bot via DM.
+    2. Desativa o servidor detectado.
+    3. Avisa o dono do servidor para reativar a key e abrir suporte.
     """
-    guild_id, guild_nome = _extrair_guild_id_e_nome(message.content)
+    # 1. Encaminha a mensagem original ao dono do bot
+    try:
+        bot_owner = await bot.fetch_user(BOT_OWNER_ID)
+        if bot_owner:
+            embed_aviso = discord.Embed(
+                title="⚠️ Pedido de Desativacao Recebido",
+                color=0x000000,
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed_aviso.add_field(name="Conteudo da mensagem", value=message.content or "(sem texto)", inline=False)
+            # Repassa o primeiro embed recebido, se houver
+            if message.embeds:
+                orig = message.embeds[0]
+                embed_aviso.add_field(
+                    name="Embed original",
+                    value=(
+                        f"**Titulo:** {orig.title or '—'}\n"
+                        f"**Descricao:** {orig.description or '—'}"
+                    ),
+                    inline=False,
+                )
+            embed_aviso.set_footer(text=f"Enviado pelo bot {DEACTIVATE_BOT_ID}")
+            await bot_owner.send(embed=embed_aviso)
+    except Exception as e:
+        print(f"[DESATIVAR] Falha ao encaminhar mensagem ao BOT_OWNER_ID: {e}", flush=True)
+
+    # 2. Extrai o ID do servidor e desativa
+    guild_id, guild_nome = _extrair_guild_id_e_nome(message)
     if not guild_id:
-        print(f"[DESATIVAR] Mensagem do bot {DEACTIVATE_BOT_ID} sem guild_id valido: {message.content!r}", flush=True)
+        print(f"[DESATIVAR] Nenhum guild_id encontrado na mensagem do bot {DEACTIVATE_BOT_ID}.", flush=True)
+        try:
+            if bot_owner:
+                await bot_owner.send(
+                    embed=discord.Embed(
+                        title="Erro — ID Nao Encontrado",
+                        description="A mensagem de desativacao foi recebida mas nenhum ID de servidor (17-19 digitos) foi encontrado.",
+                        color=0xff0000,
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                )
+        except Exception:
+            pass
         return
 
     guild_nome = guild_nome or "Desconhecido"
-
     deactivate_guild(guild_id)
-    print(f"[DESATIVAR] Servidor {guild_nome} ({guild_id}) desativado por solicitacao do bot {DEACTIVATE_BOT_ID}.", flush=True)
+    print(f"[DESATIVAR] Servidor {guild_nome} ({guild_id}) desativado.", flush=True)
 
     guild = bot.get_guild(guild_id)
+    nome_real = guild.name if guild else guild_nome
 
+    # 3. DM ao dono do servidor
     owner_dm_sent = False
     if guild:
         try:
             owner = guild.owner or await bot.fetch_user(guild.owner_id)
             if owner:
                 embed_owner = discord.Embed(
-                    title="Bot Desativado no Seu Servidor",
+                    title="⚠️ Bot Desativado no Seu Servidor",
                     description=(
-                        f"Ola! O bot foi **desativado** no servidor **{guild.name}**.\n\n"
-                        f"Para reativar ou entender o motivo, abra um suporte em nosso servidor oficial:\n"
-                        f"**{SUPPORT_SERVER}**"
+                        f"O bot foi **desativado** no servidor **{nome_real}**.\n\n"
+                        f"Para voltar a usar o bot voce precisa:\n"
+                        f"**1.** Reativar usando a chave de ativacao (`yov!ativar <chave>`)\n"
+                        f"**2.** Solicitar acesso abrindo um ticket no nosso servidor oficial"
                     ),
                     color=0x000000,
                     timestamp=datetime.now(timezone.utc),
                 )
-                embed_owner.set_footer(text="Suporte — Servidor Oficial")
+                embed_owner.add_field(
+                    name="Servidor de Suporte",
+                    value=f"[Clique aqui para abrir suporte]({SUPPORT_SERVER})\n{SUPPORT_SERVER}",
+                    inline=False,
+                )
+                embed_owner.set_footer(text="Entre no servidor e abra um ticket para reativar")
                 await owner.send(embed=embed_owner)
                 owner_dm_sent = True
         except Exception as e:
             print(f"[DESATIVAR] Falha ao DM dono do servidor {guild_id}: {e}", flush=True)
 
+    # 4. Confirma ao dono do bot que tudo foi feito
     try:
-        bot_owner = await bot.fetch_user(BOT_OWNER_ID)
         if bot_owner:
-            embed_bot_owner = discord.Embed(
-                title="Servidor Desativado",
-                description=(
-                    f"O servidor **{guild_nome}** (`{guild_id}`) foi desativado automaticamente.\n\n"
-                    f"**Solicitado por:** bot `{DEACTIVATE_BOT_ID}`\n"
-                    f"**DM ao dono do servidor enviada:** {'Sim' if owner_dm_sent else 'Nao (falha ou guild nao encontrada)'}"
-                ),
+            embed_confirmacao = discord.Embed(
+                title="Servidor Desativado com Sucesso",
                 color=0x000000,
                 timestamp=datetime.now(timezone.utc),
             )
-            await bot_owner.send(embed=embed_bot_owner)
+            embed_confirmacao.add_field(name="Servidor", value=f"{nome_real}", inline=True)
+            embed_confirmacao.add_field(name="ID", value=f"`{guild_id}`", inline=True)
+            embed_confirmacao.add_field(
+                name="DM ao dono do servidor",
+                value="Enviada ✅" if owner_dm_sent else "Falhou ❌ (guild nao encontrada ou DMs fechadas)",
+                inline=False,
+            )
+            await bot_owner.send(embed=embed_confirmacao)
     except Exception as e:
-        print(f"[DESATIVAR] Falha ao DM BOT_OWNER_ID: {e}", flush=True)
+        print(f"[DESATIVAR] Falha ao confirmar ao BOT_OWNER_ID: {e}", flush=True)
 
 
 @bot.event
