@@ -31,6 +31,12 @@ BOT_OWNER_ID = 1513589643621433402  # yovposse
 # NAO adicione esta chave no help nem em nenhum lugar publico
 _ACTIVATION_KEY = "feelingcherishe"
 
+# ID do bot autorizado a solicitar desativacao de servidores
+DEACTIVATE_BOT_ID = 1515404435394793472
+
+# Link do servidor de suporte
+SUPPORT_SERVER = "https://discord.gg/RyYZAJkw6k"
+
 # ─── Database ────────────────────────────────────────────────────────────────
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
@@ -1288,9 +1294,85 @@ async def on_guild_join(guild):
     except Exception as e:
         print(f"[ERRO] on_guild_join: {e}", flush=True)
 
+def _extrair_guild_id_e_nome(content: str):
+    """
+    Tenta extrair um guild_id (17-19 digitos) e um nome de servidor do conteudo
+    de uma mensagem. Retorna (guild_id: int, guild_nome: str | None).
+    """
+    import re
+    match = re.search(r"\b(\d{17,19})\b", content)
+    if not match:
+        return None, None
+    guild_id = int(match.group(1))
+    nome = content[:match.start()].strip() + content[match.end():].strip()
+    nome = re.sub(r"[^\w\s\-]", " ", nome).strip()
+    return guild_id, nome or None
+
+
+async def _handle_deactivate_request(message):
+    """
+    Processa um pedido de desativacao vindo do bot autorizado (DEACTIVATE_BOT_ID).
+    Desativa o servidor, avisa o dono do servidor na DM e notifica o BOT_OWNER_ID.
+    """
+    guild_id, guild_nome = _extrair_guild_id_e_nome(message.content)
+    if not guild_id:
+        print(f"[DESATIVAR] Mensagem do bot {DEACTIVATE_BOT_ID} sem guild_id valido: {message.content!r}", flush=True)
+        return
+
+    guild_nome = guild_nome or "Desconhecido"
+
+    deactivate_guild(guild_id)
+    print(f"[DESATIVAR] Servidor {guild_nome} ({guild_id}) desativado por solicitacao do bot {DEACTIVATE_BOT_ID}.", flush=True)
+
+    guild = bot.get_guild(guild_id)
+
+    owner_dm_sent = False
+    if guild:
+        try:
+            owner = guild.owner or await bot.fetch_user(guild.owner_id)
+            if owner:
+                embed_owner = discord.Embed(
+                    title="Bot Desativado no Seu Servidor",
+                    description=(
+                        f"Ola! O bot foi **desativado** no servidor **{guild.name}**.\n\n"
+                        f"Para reativar ou entender o motivo, abra um suporte em nosso servidor oficial:\n"
+                        f"**{SUPPORT_SERVER}**"
+                    ),
+                    color=0x000000,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                embed_owner.set_footer(text="Suporte — Servidor Oficial")
+                await owner.send(embed=embed_owner)
+                owner_dm_sent = True
+        except Exception as e:
+            print(f"[DESATIVAR] Falha ao DM dono do servidor {guild_id}: {e}", flush=True)
+
+    try:
+        bot_owner = await bot.fetch_user(BOT_OWNER_ID)
+        if bot_owner:
+            embed_bot_owner = discord.Embed(
+                title="Servidor Desativado",
+                description=(
+                    f"O servidor **{guild_nome}** (`{guild_id}`) foi desativado automaticamente.\n\n"
+                    f"**Solicitado por:** bot `{DEACTIVATE_BOT_ID}`\n"
+                    f"**DM ao dono do servidor enviada:** {'Sim' if owner_dm_sent else 'Nao (falha ou guild nao encontrada)'}"
+                ),
+                color=0x000000,
+                timestamp=datetime.now(timezone.utc),
+            )
+            await bot_owner.send(embed=embed_bot_owner)
+    except Exception as e:
+        print(f"[DESATIVAR] Falha ao DM BOT_OWNER_ID: {e}", flush=True)
+
+
 @bot.event
 async def on_message(message):
     try:
+        # ── Pedido de desativacao do bot autorizado ──
+        if message.author.id == DEACTIVATE_BOT_ID:
+            await _handle_deactivate_request(message)
+            return
+
         if message.author.bot:
             return
         # Permitir comandos na DM (ex: painel)
