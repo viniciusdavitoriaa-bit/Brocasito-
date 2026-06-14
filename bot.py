@@ -86,6 +86,7 @@ def get_guild_data(guild_id):
             "vip_users": {},
             "vip_perm_users": [],
             "vip_perm_role_id": None,
+            "vip_above_role_id": None,
             "vip_manager_roles": [],
             "blacklist": {},
             "anti_ban_users": {},
@@ -141,6 +142,7 @@ def get_guild_data(guild_id):
             ("panel_perm_roles", []),
             ("owner_perm_roles", []),
             ("vip_perm_role_id", None),
+            ("vip_above_role_id", None),
             ("vip_manager_roles", []),
             ("cl_roles", []),
             ("cl_palavras", []),
@@ -1019,6 +1021,17 @@ async def add_vip(guild, target_id, added_by):
     }
     update_guild_data(guild.id, gd)
     if role:
+        # Posiciona o cargo VIP logo abaixo do cargo de referencia (vip_above_role_id)
+        above_role_id = gd.get("vip_above_role_id")
+        if above_role_id:
+            above_role = guild.get_role(int(above_role_id))
+            if above_role:
+                try:
+                    # Posiciona o cargo VIP logo abaixo do cargo de referencia
+                    new_position = max(1, above_role.position - 1)
+                    await role.edit(position=new_position, reason="Posicionando cargo VIP abaixo do cargo de referencia")
+                except Exception:
+                    pass
         try:
             member = guild.get_member(target_id) or await guild.fetch_member(target_id)
             if member:
@@ -2763,7 +2776,46 @@ class GerenciarVipView(discord.ui.View):
 
     @discord.ui.button(label="Alterar Emoji", style=discord.ButtonStyle.secondary, row=0)
     async def alterar_emoji(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(GerenciarVipModal("emoji"))
+        await interaction.response.send_message(
+            "Envie um emoji do Discord **neste canal agora** para definir como emoji do seu cargo.\n"
+            "Você tem 30 segundos. *(apenas emojis padrão do Discord são suportados)*",
+            ephemeral=True
+        )
+
+        def check(m):
+            return m.author.id == interaction.user.id and m.channel.id == interaction.channel.id
+
+        try:
+            msg = await interaction.client.wait_for("message", timeout=30.0, check=check)
+        except asyncio.TimeoutError:
+            try:
+                await interaction.followup.send("Tempo esgotado. Tente novamente.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        emoji_valor = msg.content.strip()
+
+        # Tenta apagar a mensagem do membro no chat
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        gd = get_guild_data(interaction.guild.id)
+        vip_data = gd["vip_users"].get(str(interaction.user.id))
+        if not vip_data or not vip_data.get("role_id"):
+            return await interaction.followup.send("Voce nao tem cargo VIP.", ephemeral=True)
+        role = interaction.guild.get_role(int(vip_data["role_id"]))
+        if not role:
+            return await interaction.followup.send("Cargo nao encontrado.", ephemeral=True)
+        try:
+            await role.edit(unicode_emoji=emoji_valor, reason="gerenciarvip")
+            await interaction.followup.send(f"Emoji do cargo alterado para {emoji_valor}.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("Sem permissao para editar o cargo.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Erro ao definir emoji: {e}\nVerifique se enviou um emoji padrao do Discord.", ephemeral=True)
 
     @discord.ui.button(label="Ver Membros", style=discord.ButtonStyle.secondary, row=1)
     async def ver_membros(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2808,6 +2860,52 @@ async def gerenciarvip(ctx):
         pass
     await ctx.channel.send(embed=embed, view=view)
 
+@bot.command(name="cargovipabaixo")
+async def cargo_vip_abaixo(ctx, cargo=None):
+    """
+    Define o cargo de referencia que fica ACIMA de todos os cargos VIP criados pelos membros.
+    Novos cargos VIP serao posicionados logo abaixo deste cargo.
+    Apenas o dono do servidor pode usar.
+    Sem argumento: remove a referencia.
+    Uso: {prefixo}cargovipabaixo @cargo
+    """
+    if ctx.author.id != ctx.guild.owner_id:
+        return await reply_and_delete(ctx, error_embed("Apenas o dono do servidor pode usar este comando.", ctx.guild))
+
+    gd = get_guild_data(ctx.guild.id)
+
+    if cargo is None:
+        gd["vip_above_role_id"] = None
+        update_guild_data(ctx.guild.id, gd)
+        return await reply_and_delete(ctx, success_embed(
+            "Referencia VIP Removida",
+            "Nenhum cargo de referencia definido. Os cargos VIP serao criados na posicao padrao.",
+            ctx.guild
+        ))
+
+    # Resolve o cargo por mencao ou ID
+    role = None
+    if isinstance(cargo, str):
+        cargo_clean = cargo.strip("<@&>")
+        if cargo_clean.isdigit():
+            role = ctx.guild.get_role(int(cargo_clean))
+    if role is None:
+        try:
+            role = await commands.RoleConverter().convert(ctx, str(cargo))
+        except Exception:
+            pass
+    if not role:
+        return await reply_and_delete(ctx, error_embed("Cargo nao encontrado. Use @ ou o ID do cargo.", ctx.guild))
+
+    gd["vip_above_role_id"] = str(role.id)
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed(
+        "Cargo VIP Referencia Definido",
+        f"O cargo {role.mention} agora e a referencia acima dos cargos VIP.\n"
+        f"Todos os novos cargos VIP criados pelos membros serao posicionados logo **abaixo** de {role.mention}.",
+        ctx.guild
+    ))
+
 @bot.command(name="helpvip")
 async def helpvip(ctx):
     gd = get_guild_data(ctx.guild.id) if ctx.guild else {}
@@ -2819,7 +2917,9 @@ async def helpvip(ctx):
         f"`{p}addantban @user` — distribuir Anti-Ban para um membro (max 5)\n"
         f"`{p}removeantban @user` — remover Anti-Ban de um membro\n"
         f"`{p}gerenciarvip` — painel para editar nome, cor e emoji do seu cargo\n"
-        f"`{p}vipinfo [@user]` — ver informacoes do VIP"
+        f"`{p}vipinfo [@user]` — ver informacoes do VIP\n\n"
+        f"**Admin:**\n"
+        f"`{p}cargovipabaixo @cargo` — define o cargo acima de todos os cargos VIP"
     )
     embed.set_footer(text="Apenas membros com status VIP podem usar estes comandos.")
     await reply_and_delete(ctx, embed)
@@ -3272,6 +3372,7 @@ def _build_help_pages(guild, p):
         f"`{p}addpermvip @user` — dar status VIP ao membro (cria cargo)\n"
         f"`{p}removepermvip @user` — remover VIP e deletar cargo\n"
         f"`{p}setpermvip @cargo` — definir cargo que pode gerenciar VIPs\n"
+        f"`{p}cargovipabaixo @cargo` — definir o cargo que fica acima de todos os cargos VIP\n"
         f"`{p}addpermcargo @cargo` — adicionar cargo a lista de gestores VIP\n"
         f"`{p}removepermcargo @cargo` — remover cargo da lista\n"
         f"`{p}vipinfo [@user]` — ver informacoes VIP\n"
@@ -3522,68 +3623,302 @@ async def owner_panel(ctx):
 
 # ─── Enviar Mensagem para DMs ─────────────────────────────────────────────────
 
+class _EnviarMsgState:
+    """Guarda o estado da mensagem em construcao para cada usuario."""
+    def __init__(self):
+        self.descricao: str = None
+        self.banner_url: str = None
+        self.logo_url: str = None
+        self.cor: int = 0x000000
+
+# estado por (guild_id, user_id)
+_enviarmsg_states: dict = {}
+
+
+class DescricaoMsgModal(discord.ui.Modal, title="Adicionar Descricao"):
+    descricao = discord.ui.TextInput(
+        label="Texto da mensagem",
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+        required=True,
+        placeholder="Digite o texto que aparecera na embed..."
+    )
+
+    def __init__(self, state: _EnviarMsgState, view_msg):
+        super().__init__()
+        self.state = state
+        self.view_msg = view_msg
+        if state.descricao:
+            self.descricao.default = state.descricao
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.state.descricao = self.descricao.value.strip()
+        await interaction.response.send_message(
+            f"Descricao definida.\n> {self.state.descricao[:100]}{'...' if len(self.state.descricao) > 100 else ''}",
+            ephemeral=True
+        )
+        await _refresh_enviarmsg_preview(interaction, self.state, self.view_msg)
+
+
+class CorHexMsgModal(discord.ui.Modal, title="Definir Cor da Embed"):
+    cor = discord.ui.TextInput(
+        label="Cor hex (ex: #FF0000)",
+        max_length=7,
+        required=True,
+        placeholder="#000000"
+    )
+
+    def __init__(self, state: _EnviarMsgState, view_msg):
+        super().__init__()
+        self.state = state
+        self.view_msg = view_msg
+        self.cor.default = f"#{state.cor:06X}" if state.cor else "#000000"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cor_val = self.cor.value.strip().lstrip("#")
+        if len(cor_val) != 6:
+            return await interaction.response.send_message("Cor invalida. Use 6 caracteres hex, ex: `#FF0000`.", ephemeral=True)
+        try:
+            self.state.cor = int(cor_val, 16)
+        except ValueError:
+            return await interaction.response.send_message("Cor invalida.", ephemeral=True)
+        await interaction.response.send_message(f"Cor definida: `#{cor_val.upper()}`.", ephemeral=True)
+        await _refresh_enviarmsg_preview(interaction, self.state, self.view_msg)
+
+
+class BannerMsgModal(discord.ui.Modal, title="Adicionar Banner"):
+    url = discord.ui.TextInput(
+        label="URL da imagem do banner",
+        max_length=500,
+        required=True,
+        placeholder="https://..."
+    )
+
+    def __init__(self, state: _EnviarMsgState, view_msg):
+        super().__init__()
+        self.state = state
+        self.view_msg = view_msg
+        if state.banner_url:
+            self.url.default = state.banner_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.state.banner_url = self.url.value.strip()
+        await interaction.response.send_message("Banner definido.", ephemeral=True)
+        await _refresh_enviarmsg_preview(interaction, self.state, self.view_msg)
+
+
+class LogoMsgModal(discord.ui.Modal, title="Adicionar Logo"):
+    url = discord.ui.TextInput(
+        label="URL da imagem da logo",
+        max_length=500,
+        required=True,
+        placeholder="https://..."
+    )
+
+    def __init__(self, state: _EnviarMsgState, view_msg):
+        super().__init__()
+        self.state = state
+        self.view_msg = view_msg
+        if state.logo_url:
+            self.url.default = state.logo_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.state.logo_url = self.url.value.strip()
+        await interaction.response.send_message("Logo definida.", ephemeral=True)
+        await _refresh_enviarmsg_preview(interaction, self.state, self.view_msg)
+
+
+async def _refresh_enviarmsg_preview(interaction: discord.Interaction, state: _EnviarMsgState, view_msg):
+    """Atualiza o embed de preview do painel com o estado atual."""
+    try:
+        preview = _build_enviarmsg_preview(interaction.guild, state)
+        await view_msg.edit(embed=preview)
+    except Exception:
+        pass
+
+
+def _build_enviarmsg_preview(guild, state: _EnviarMsgState) -> discord.Embed:
+    """Monta o embed de preview mostrando o que foi configurado ate agora."""
+    embed = discord.Embed(
+        title="Painel — Enviar Mensagem por DM",
+        color=state.cor,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(
+        name="Descricao",
+        value=f"```{state.descricao[:200]}...```" if state.descricao and len(state.descricao) > 200
+              else f"```{state.descricao}```" if state.descricao else "*(nao definida)*",
+        inline=False
+    )
+    embed.add_field(name="Cor", value=f"`#{state.cor:06X}`" if state.cor else "*(nao definida — padrao preto)*", inline=True)
+    embed.add_field(name="Banner", value=state.banner_url or "*(nao definido)*", inline=False)
+    embed.add_field(name="Logo", value=state.logo_url or "*(nao definida)*", inline=False)
+    embed.set_footer(text="Use os botoes abaixo para configurar a mensagem e depois clique em Enviar.")
+    if state.banner_url:
+        try:
+            embed.set_image(url=state.banner_url)
+        except Exception:
+            pass
+    if state.logo_url:
+        try:
+            embed.set_thumbnail(url=state.logo_url)
+        except Exception:
+            pass
+    return embed
+
+
+class EnviarMsgView(discord.ui.View):
+    def __init__(self, owner_id: int, state: _EnviarMsgState, view_msg_ref: list):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.state = state
+        self.view_msg_ref = view_msg_ref  # lista com [Message] para poder atualizar
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Apenas quem abriu o painel pode usar.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="➕ Adicionar Descricao", style=discord.ButtonStyle.secondary, row=0)
+    async def add_descricao(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        await interaction.response.send_modal(DescricaoMsgModal(self.state, msg))
+
+    @discord.ui.button(label="🖼️ Adicionar Banner", style=discord.ButtonStyle.secondary, row=0)
+    async def add_banner(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        await interaction.response.send_modal(BannerMsgModal(self.state, msg))
+
+    @discord.ui.button(label="🏷️ Adicionar Logo", style=discord.ButtonStyle.secondary, row=0)
+    async def add_logo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        await interaction.response.send_modal(LogoMsgModal(self.state, msg))
+
+    @discord.ui.button(label="🎨 Cor Hex", style=discord.ButtonStyle.secondary, row=0)
+    async def add_cor(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        await interaction.response.send_modal(CorHexMsgModal(self.state, msg))
+
+    @discord.ui.button(label="📨 Enviar", style=discord.ButtonStyle.secondary, row=1)
+    async def enviar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.state.descricao:
+            return await interaction.response.send_message(
+                "Adicione uma descricao antes de enviar.", ephemeral=True
+            )
+
+        # Desabilita todos os botoes imediatamente
+        for child in self.children:
+            child.disabled = True
+        sending_embed = _build_enviarmsg_preview(interaction.guild, self.state)
+        sending_embed.title = "Enviando... Aguarde."
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        if msg:
+            try:
+                await msg.edit(embed=sending_embed, view=self)
+            except Exception:
+                pass
+        await interaction.response.defer(ephemeral=True)
+
+        # Monta a embed que vai para a DM de cada membro
+        embed_dm = discord.Embed(
+            title=f"Mensagem de {interaction.guild.name}",
+            description=self.state.descricao,
+            color=self.state.cor,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed_dm.set_footer(text=f"Enviado por {interaction.user.display_name}")
+        if self.state.logo_url:
+            try:
+                embed_dm.set_thumbnail(url=self.state.logo_url)
+            except Exception:
+                pass
+        if self.state.banner_url:
+            try:
+                embed_dm.set_image(url=self.state.banner_url)
+            except Exception:
+                pass
+
+        sent_members = []
+        failed = 0
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            try:
+                await member.send(embed=embed_dm)
+                sent_members.append(member)
+                await asyncio.sleep(0.4)
+            except Exception:
+                failed += 1
+
+        # Monta o embed de resultado com mencoes de quem recebeu
+        mencoes = " ".join(m.mention for m in sent_members)
+        # Discord limita embed description a 4096 chars
+        if len(mencoes) > 3800:
+            mencoes_exibido = mencoes[:3800] + f"\n*(e mais {len(mencoes[3800:].split()) } membros...)*"
+        else:
+            mencoes_exibido = mencoes if mencoes else "*(nenhum membro recebeu)*"
+
+        result_embed = create_embed(
+            interaction.guild,
+            "Mensagem Enviada por DM",
+            f"**Enviados com sucesso:** {len(sent_members)}\n"
+            f"**Falharam (DM fechada):** {failed}\n\n"
+            f"**Membros que receberam:**\n{mencoes_exibido}"
+        )
+        if msg:
+            try:
+                await msg.edit(embed=result_embed, view=None)
+            except Exception:
+                await interaction.channel.send(embed=result_embed)
+        else:
+            await interaction.channel.send(embed=result_embed)
+
+        await interaction.followup.send("Mensagem enviada com sucesso!", ephemeral=True)
+
+        # Limpa o estado
+        key = (interaction.guild.id, self.owner_id)
+        _enviarmsg_states.pop(key, None)
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.secondary, row=1)
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        cancel_embed = create_embed(interaction.guild, "Cancelado", "O envio de mensagens foi cancelado.")
+        msg = self.view_msg_ref[0] if self.view_msg_ref else None
+        if msg:
+            try:
+                await msg.edit(embed=cancel_embed, view=self)
+            except Exception:
+                pass
+        await interaction.response.send_message("Cancelado.", ephemeral=True)
+        key = (interaction.guild.id, self.owner_id)
+        _enviarmsg_states.pop(key, None)
+
+
 @bot.command(name="enviarmsg")
-async def enviarmsg(ctx, cor: str = None, *, mensagem: str = None):
+async def enviarmsg(ctx):
     """
-    Dono do servidor envia uma embed para a DM de todos os membros com DM aberta.
-    Uso: yov!enviarmsg #FF0000 Sua mensagem aqui
-    A cor hex e opcional — sem ela a embed fica preta.
+    Abre o painel para montar e enviar uma embed por DM a todos os membros.
+    Apenas o dono do servidor pode usar.
     """
     if not is_server_owner(ctx):
         return await reply_and_delete(ctx, error_embed("Apenas o dono do servidor pode usar este comando.", ctx.guild))
-
-    # Se nao for uma cor hex valida, tratar o argumento como parte da mensagem
-    embed_color = 0x000000
-    if cor:
-        cor_clean = cor.lstrip("#")
-        if len(cor_clean) == 6:
-            try:
-                embed_color = int(cor_clean, 16)
-            except ValueError:
-                mensagem = f"{cor} {mensagem}" if mensagem else cor
-                embed_color = 0x000000
-        else:
-            mensagem = f"{cor} {mensagem}" if mensagem else cor
-
-    if not mensagem:
-        return await reply_and_delete(ctx, error_embed(
-            "Voce precisa digitar uma mensagem.\nUso: `yov!enviarmsg #FF0000 Sua mensagem`\n(A cor e opcional)", ctx.guild
-        ))
 
     try:
         await ctx.message.delete()
     except Exception:
         pass
 
-    progress_msg = await ctx.channel.send(embed=create_embed(ctx.guild, "Enviando...", "Enviando mensagem para os membros. Aguarde."))
+    key = (ctx.guild.id, ctx.author.id)
+    state = _EnviarMsgState()
+    _enviarmsg_states[key] = state
 
-    sent = 0
-    failed = 0
-    embed_dm = discord.Embed(
-        title=f"Mensagem de {ctx.guild.name}",
-        description=mensagem,
-        color=embed_color,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed_dm.set_footer(text=f"Enviado por {ctx.author.display_name}")
-    if ctx.guild.icon:
-        embed_dm.set_thumbnail(url=ctx.guild.icon.url)
-
-    for member in ctx.guild.members:
-        if member.bot:
-            continue
-        try:
-            await member.send(embed=embed_dm)
-            sent += 1
-            await asyncio.sleep(0.4)
-        except Exception:
-            failed += 1
-
-    result_embed = create_embed(ctx.guild, "Mensagem Enviada", f"**Enviados:** {sent}\n**Falharam (DM fechada):** {failed}")
-    try:
-        await progress_msg.edit(embed=result_embed)
-    except Exception:
-        await ctx.channel.send(embed=result_embed)
+    preview_embed = _build_enviarmsg_preview(ctx.guild, state)
+    view_msg_ref = []
+    view = EnviarMsgView(ctx.author.id, state, view_msg_ref)
+    panel_msg = await ctx.channel.send(embed=preview_embed, view=view)
+    view_msg_ref.append(panel_msg)
 
 # ─── Painel de Setar Cargo ────────────────────────────────────────────────────
 
