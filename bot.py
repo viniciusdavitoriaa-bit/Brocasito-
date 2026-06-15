@@ -11,6 +11,13 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from dotenv import load_dotenv
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -42,6 +49,7 @@ SUPPORT_SERVER = "https://discord.gg/RyYZAJkw6k"
 # ─── Database ────────────────────────────────────────────────────────────────
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 DEFAULT_ANTIRAID = {
     "anti_spam": True,
@@ -50,7 +58,198 @@ DEFAULT_ANTIRAID = {
     "anti_disconnect": True,
 }
 
+# ─── PostgreSQL helpers ───────────────────────────────────────────────────────
+
+def _pg_connect():
+    """Abre uma conexao com o PostgreSQL usando DATABASE_URL."""
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+def init_db_postgres():
+    """
+    Cria a tabela guild_data (uma linha por servidor) se nao existir.
+    Migra dados da tabela antiga bot_data automaticamente, se houver.
+    """
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+
+        # Tabela principal: uma linha por servidor
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_data (
+                guild_id    TEXT        PRIMARY KEY,
+                guild_name  TEXT,
+                data        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+                created_at  TIMESTAMPTZ DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        # Migra dados da tabela antiga (bot_data) se existir
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'bot_data'
+            )
+        """)
+        if cur.fetchone()["exists"]:
+            cur.execute("SELECT data FROM bot_data WHERE id = 1")
+            row = cur.fetchone()
+            if row and row["data"] and "guilds" in row["data"]:
+                guilds = row["data"]["guilds"]
+                for gid, gdata in guilds.items():
+                    cur.execute("""
+                        INSERT INTO guild_data (guild_id, data)
+                        VALUES (%s, %s)
+                        ON CONFLICT (guild_id) DO NOTHING
+                    """, (gid, json.dumps(gdata, ensure_ascii=False)))
+                if guilds:
+                    print(f"[DB] Migrados {len(guilds)} servidores da tabela antiga.", flush=True)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("[DB] PostgreSQL conectado. Tabela guild_data pronta.", flush=True)
+    except Exception as e:
+        print(f"[ERRO] init_db_postgres: {e}", flush=True)
+
+def pg_register_guild(guild_id: int, guild_name: str):
+    """Registra ou atualiza o nome de um servidor na tabela guild_data."""
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO guild_data (guild_id, guild_name, data)
+            VALUES (%s, %s, '{}'::jsonb)
+            ON CONFLICT (guild_id) DO UPDATE
+                SET guild_name = EXCLUDED.guild_name,
+                    updated_at = NOW()
+        """, (str(guild_id), guild_name))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] pg_register_guild: {e}", flush=True)
+
+# ─── Dados padrao de um servidor ─────────────────────────────────────────────
+
+def _make_default_guild_data():
+    return {
+        "log_channels": {},
+        "vip_users": {},
+        "vip_perm_users": [],
+        "vip_perm_role_id": None,
+        "vip_above_role_id": None,
+        "vip_manager_roles": [],
+        "blacklist": {},
+        "anti_ban_users": {},
+        "ban_limits": {},
+        "vanity_url": None,
+        "owner_id": None,
+        "prefix": PREFIX,
+        "embed_color": None,
+        "protected_users": [],
+        "antiraid_settings": dict(DEFAULT_ANTIRAID),
+        "activated": False,
+        "min_role_id": None,
+        "ban_roles": [],
+        "panel_roles": [],
+        "panel_perm_roles": [],
+        "owner_perm_roles": [],
+        "cl_roles": [],
+        "cl_palavras": [],
+        "ticket_config": {
+            "title": "Suporte — Abrir Ticket",
+            "description": "Clique no botao abaixo para abrir um ticket.\nNossa equipe respondera em breve.",
+            "open_description": None,
+            "category_id": None,
+            "support_role_ids": [],
+            "assume_role_ids": [],
+            "counter": 0,
+            "options": [],
+        },
+        "welcome_config": {
+            "enabled": False,
+            "channel_id": None,
+            "title": "Bem-vindo(a) ao servidor!",
+            "description": "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**.",
+            "color": None,
+        },
+    }
+
+def _apply_guild_defaults(gd: dict):
+    """Garante que todos os campos obrigatorios existam. Retorna (gd, changed)."""
+    changed = False
+    defaults = [
+        ("prefix", PREFIX),
+        ("embed_color", None),
+        ("protected_users", []),
+        ("antiraid_settings", dict(DEFAULT_ANTIRAID)),
+        ("activated", False),
+        ("min_role_id", None),
+        ("ban_roles", []),
+        ("panel_roles", []),
+        ("panel_perm_roles", []),
+        ("owner_perm_roles", []),
+        ("vip_perm_role_id", None),
+        ("vip_above_role_id", None),
+        ("vip_manager_roles", []),
+        ("cl_roles", []),
+        ("cl_palavras", []),
+        ("ticket_config", {
+            "title": "Suporte — Abrir Ticket",
+            "description": "Clique no botao abaixo para abrir um ticket.\nNossa equipe respondera em breve.",
+            "open_description": None,
+            "category_id": None,
+            "support_role_ids": [],
+            "assume_role_ids": [],
+            "counter": 0,
+            "options": [],
+        }),
+    ]
+    for key, default in defaults:
+        if key not in gd:
+            gd[key] = default
+            changed = True
+    ar = gd.setdefault("antiraid_settings", dict(DEFAULT_ANTIRAID))
+    for k, v in DEFAULT_ANTIRAID.items():
+        if k not in ar:
+            ar[k] = v
+            changed = True
+    tc = gd.setdefault("ticket_config", {})
+    for tk, tv in [("assume_role_ids", []), ("open_description", None)]:
+        if tk not in tc:
+            tc[tk] = tv
+            changed = True
+    if "welcome_config" not in gd:
+        gd["welcome_config"] = {
+            "enabled": False,
+            "channel_id": None,
+            "title": "Bem-vindo(a) ao servidor!",
+            "description": "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**.",
+            "color": None,
+        }
+        changed = True
+    else:
+        wc = gd["welcome_config"]
+        for wk, wv in [
+            ("enabled", False), ("channel_id", None),
+            ("title", "Bem-vindo(a) ao servidor!"),
+            ("description", "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**."),
+            ("color", None),
+        ]:
+            if wk not in wc:
+                wc[wk] = wv
+                changed = True
+    return gd, changed
+
+# ─── load_db / save_db (fallback arquivo local) ───────────────────────────────
+
 def load_db():
+    """Carrega o JSON local (usado apenas no fallback sem DATABASE_URL)."""
     if not os.path.exists(DB_PATH):
         save_db({"guilds": {}})
     try:
@@ -71,6 +270,7 @@ def load_db():
         return data
 
 def save_db(data):
+    """Salva o JSON local (usado apenas no fallback sem DATABASE_URL)."""
     try:
         tmp = DB_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -80,126 +280,74 @@ def save_db(data):
         print(f"[ERRO] Falha ao salvar banco: {e}", flush=True)
 
 def get_guild_data(guild_id):
-    db = load_db()
     gid = str(guild_id)
+
+    # ── PostgreSQL: uma linha por servidor ──
+    if DATABASE_URL and _PSYCOPG2_AVAILABLE:
+        try:
+            conn = _pg_connect()
+            cur = conn.cursor()
+            cur.execute("SELECT data FROM guild_data WHERE guild_id = %s", (gid,))
+            row = cur.fetchone()
+            if not row:
+                default = _make_default_guild_data()
+                cur.execute("""
+                    INSERT INTO guild_data (guild_id, data)
+                    VALUES (%s, %s)
+                    ON CONFLICT (guild_id) DO NOTHING
+                """, (gid, json.dumps(default, ensure_ascii=False)))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return default
+            gd = dict(row["data"])
+            cur.close()
+            conn.close()
+            gd, changed = _apply_guild_defaults(gd)
+            if changed:
+                update_guild_data(guild_id, gd)
+            return gd
+        except Exception as e:
+            print(f"[ERRO] get_guild_data (postgres): {e}", flush=True)
+            return _make_default_guild_data()
+
+    # ── JSON local (fallback sem DATABASE_URL) ──
+    db = load_db()
     if gid not in db["guilds"]:
-        db["guilds"][gid] = {
-            "log_channels": {},
-            "vip_users": {},
-            "vip_perm_users": [],
-            "vip_perm_role_id": None,
-            "vip_above_role_id": None,
-            "vip_manager_roles": [],
-            "blacklist": {},
-            "anti_ban_users": {},
-            "ban_limits": {},
-            "vanity_url": None,
-            "owner_id": None,
-            "prefix": PREFIX,
-            "embed_color": None,
-            "protected_users": [],
-            "antiraid_settings": dict(DEFAULT_ANTIRAID),
-            # Novos campos v4
-            "activated": False,
-            "min_role_id": None,
-            "ban_roles": [],
-            "panel_roles": [],
-            "panel_perm_roles": [],
-            "owner_perm_roles": [],
-            "cl_roles": [],
-            "cl_palavras": [],
-            # Ticket v6
-            "ticket_config": {
-                "title": "Suporte — Abrir Ticket",
-                "description": "Clique no botao abaixo para abrir um ticket.\nNossa equipe respondera em breve.",
-                "open_description": None,
-                "category_id": None,
-                "support_role_ids": [],
-                "assume_role_ids": [],
-                "counter": 0,
-                "options": [],
-            },
-            # Boas-vindas v7
-            "welcome_config": {
-                "enabled": False,
-                "channel_id": None,
-                "title": "Bem-vindo(a) ao servidor!",
-                "description": "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**.",
-                "color": None,
-            },
-        }
+        db["guilds"][gid] = _make_default_guild_data()
         save_db(db)
     else:
-        gd = db["guilds"][gid]
-        changed = False
-        defaults = [
-            ("prefix", PREFIX),
-            ("embed_color", None),
-            ("protected_users", []),
-            ("antiraid_settings", dict(DEFAULT_ANTIRAID)),
-            ("activated", False),
-            ("min_role_id", None),
-            ("ban_roles", []),
-            ("panel_roles", []),
-            ("panel_perm_roles", []),
-            ("owner_perm_roles", []),
-            ("vip_perm_role_id", None),
-            ("vip_above_role_id", None),
-            ("vip_manager_roles", []),
-            ("cl_roles", []),
-            ("cl_palavras", []),
-            ("ticket_config", {
-                "title": "Suporte — Abrir Ticket",
-                "description": "Clique no botao abaixo para abrir um ticket.\nNossa equipe respondera em breve.",
-                "open_description": None,
-                "category_id": None,
-                "support_role_ids": [],
-                "assume_role_ids": [],
-                "counter": 0,
-                "options": [],
-            }),
-        ]
-        for key, default in defaults:
-            if key not in gd:
-                gd[key] = default
-                changed = True
-        ar = gd.get("antiraid_settings", {})
-        for k, v in DEFAULT_ANTIRAID.items():
-            if k not in ar:
-                ar[k] = v
-                changed = True
-        tc = gd.get("ticket_config", {})
-        if "assume_role_ids" not in tc:
-            tc["assume_role_ids"] = []
-            changed = True
-        if "open_description" not in tc:
-            tc["open_description"] = None
-            changed = True
-        if "welcome_config" not in gd:
-            gd["welcome_config"] = {
-                "enabled": False,
-                "channel_id": None,
-                "title": "Bem-vindo(a) ao servidor!",
-                "description": "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**.",
-                "color": None,
-            }
-            changed = True
-        else:
-            wc = gd["welcome_config"]
-            for wk, wv in [("enabled", False), ("channel_id", None),
-                           ("title", "Bem-vindo(a) ao servidor!"),
-                           ("description", "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**."),
-                           ("color", None)]:
-                if wk not in wc:
-                    wc[wk] = wv
-                    changed = True
+        gd, changed = _apply_guild_defaults(db["guilds"][gid])
+        db["guilds"][gid] = gd
         if changed:
             save_db(db)
     return db["guilds"][gid]
 
 def update_guild_data(guild_id, data):
+    gid = str(guild_id)
+
+    # ── PostgreSQL ──
+    if DATABASE_URL and _PSYCOPG2_AVAILABLE:
+        try:
+            conn = _pg_connect()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO guild_data (guild_id, data, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (guild_id) DO UPDATE
+                    SET data = EXCLUDED.data,
+                        updated_at = NOW()
+            """, (gid, json.dumps(data, ensure_ascii=False)))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"[ERRO] update_guild_data (postgres): {e}", flush=True)
+        return
+
+    # ── JSON local ──
     db = load_db()
-    db["guilds"][str(guild_id)] = data
+    db["guilds"][gid] = data
     save_db(db)
 
 def get_ar(guild_id, key):
@@ -1237,6 +1385,40 @@ class AntiRaidPanelView(discord.ui.View):
 async def on_ready():
     print(f"[BOT] Online como {bot.user}", flush=True)
     print(f"[BOT] Servidores: {len(bot.guilds)}", flush=True)
+
+    # ── Sync de servidores no banco ──────────────────────────────────────────
+    # Garante que todos os servidores em que o bot esta tenham uma linha no banco.
+    # Nao sobrescreve o campo "activated" de servidores ja registrados.
+    # Isso evita que redeploys no Railway forcam re-ativacao.
+    if DATABASE_URL and _PSYCOPG2_AVAILABLE:
+        try:
+            conn = _pg_connect()
+            cur = conn.cursor()
+            for guild in bot.guilds:
+                gid = str(guild.id)
+                cur.execute("SELECT guild_id FROM guild_data WHERE guild_id = %s", (gid,))
+                if cur.fetchone() is None:
+                    # Servidor novo no banco — cria com dados padrao (activated=False)
+                    default = _make_default_guild_data()
+                    cur.execute("""
+                        INSERT INTO guild_data (guild_id, guild_name, data)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (guild_id) DO NOTHING
+                    """, (gid, guild.name, json.dumps(default, ensure_ascii=False)))
+                    print(f"[DB] Servidor novo registrado: {guild.name} ({gid})", flush=True)
+                else:
+                    # Servidor ja existe — apenas atualiza o nome (nao toca no activated)
+                    cur.execute("""
+                        UPDATE guild_data SET guild_name = %s, updated_at = NOW()
+                        WHERE guild_id = %s
+                    """, (guild.name, gid))
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"[DB] Sync concluido: {len(bot.guilds)} servidor(es) verificado(s).", flush=True)
+        except Exception as e:
+            print(f"[ERRO] on_ready sync: {e}", flush=True)
+
     try:
         await bot.change_presence(activity=discord.Game(name="yov!help | Anti-Raid ativo"))
     except Exception:
@@ -1257,9 +1439,13 @@ async def on_resumed():
 
 @bot.event
 async def on_guild_join(guild):
-    """Ao entrar em um novo servidor, notifica o dono do bot para aprovacao."""
+    """Ao entrar em um novo servidor, registra no banco e notifica o dono do bot para aprovacao."""
     try:
         print(f"[BOT] Entrou no servidor: {guild.name} ({guild.id})", flush=True)
+        # Cria / atualiza a entrada do servidor no banco de dados
+        pg_register_guild(guild.id, guild.name)
+        # Garante que o registro padrao existe (cria se novo)
+        get_guild_data(guild.id)
         if BOT_OWNER_ID == 0:
             print("[AVISO] BOT_OWNER_ID nao configurado. Ativacao automatica desabilitada.", flush=True)
             return
@@ -3315,11 +3501,19 @@ async def ping(ctx):
     embed.add_field(name="Latencia da mensagem", value=f"{msg_latency}ms", inline=True)
     await reply_and_delete(ctx, embed)
 
-@bot.command(name="restart")
-async def restart(ctx):
-    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
-        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
-    await ctx.reply(embed=success_embed("Reiniciando", "O bot sera reiniciado em instantes.", ctx.guild))
+@bot.command(name="reiniciar", hidden=True)
+async def reiniciar(ctx):
+    """Reinicia o bot (apenas dono do bot). Nao aparece no help."""
+    if not is_bot_owner(ctx.author.id):
+        return
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+    try:
+        await ctx.author.send(embed=success_embed("Reiniciando", "O bot sera reiniciado em instantes.", ctx.guild))
+    except Exception:
+        pass
     await asyncio.sleep(1)
     os._exit(0)
 
@@ -3448,7 +3642,6 @@ def _build_help_pages(guild, p):
     e4.add_field(name="─── Geral ───", value=(
         f"`{p}status` — ver status do servidor\n"
         f"`{p}ping` — latencia do bot\n"
-        f"`{p}restart` — reiniciar o bot\n"
         f"`{p}help` — exibir esta mensagem\n"
         f"`{p}helpvip` — comandos exclusivos para membros VIP"
     ), inline=False)
@@ -5422,6 +5615,9 @@ async def on_command_error(ctx, error):
 if not TOKEN:
     print("[ERRO FATAL] DISCORD_TOKEN nao definido.", flush=True)
     sys.exit(1)
+
+# Inicializa o banco de dados PostgreSQL (se DATABASE_URL estiver definida)
+init_db_postgres()
 
 try:
     bot.run(TOKEN, log_handler=None)
