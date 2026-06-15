@@ -5,6 +5,8 @@ import os
 import asyncio
 import sys
 import traceback
+import re
+import aiohttp
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -2711,6 +2713,56 @@ async def removevip(ctx, member: discord.Member = None):
     await reply_and_delete(ctx, success_embed("Cargo VIP Removido", f"{member.mention} perdeu o cargo {role.mention}.", ctx.guild))
 
 
+async def aplicar_emoji_cargo(role: discord.Role, emoji_str: str, guild: discord.Guild):
+    """
+    Aplica emoji ao cargo VIP.
+    Suporta emojis Unicode padrao (ex: 🎉) e emojis personalizados do servidor (ex: <:nome:123>).
+    Retorna (sucesso: bool, mensagem: str)
+    """
+    emoji_str = emoji_str.strip()
+
+    # Detecta emoji personalizado: <:nome:id> ou <a:nome:id> (animado)
+    custom_match = re.match(r"<a?:(\w+):(\d+)>", emoji_str)
+    if custom_match:
+        emoji_name = custom_match.group(1)
+        emoji_id = int(custom_match.group(2))
+
+        emoji_obj = guild.get_emoji(emoji_id)
+        if not emoji_obj:
+            return False, (
+                f"Emoji `:{emoji_name}:` nao encontrado neste servidor.\n"
+                "Apenas emojis personalizados **deste servidor** podem ser usados como icone de cargo."
+            )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(str(emoji_obj.url)) as resp:
+                    if resp.status != 200:
+                        return False, "Nao foi possivel baixar a imagem do emoji. Tente novamente."
+                    emoji_bytes = await resp.read()
+            await role.edit(display_icon=emoji_bytes, reason="gerenciarvip")
+            return True, f"Emoji do cargo alterado para {emoji_obj} (`:{emoji_name}:`)."
+        except discord.Forbidden:
+            return False, (
+                "Sem permissao para definir icone no cargo.\n"
+                "O servidor precisa ter **nivel 2 de boost** para usar icones personalizados em cargos."
+            )
+        except Exception as e:
+            return False, f"Erro ao definir emoji personalizado: {e}"
+    else:
+        # Emoji Unicode padrao
+        try:
+            await role.edit(unicode_emoji=emoji_str, reason="gerenciarvip")
+            return True, f"Emoji do cargo alterado para {emoji_str}."
+        except discord.Forbidden:
+            return False, "Sem permissao para editar o cargo."
+        except Exception as e:
+            return False, (
+                f"Erro ao definir emoji: {e}\n"
+                "Verifique se enviou um emoji valido do Discord."
+            )
+
+
 class GerenciarVipModal(discord.ui.Modal, title="Editar Cargo VIP"):
     def __init__(self, field: str):
         super().__init__()
@@ -2720,7 +2772,12 @@ class GerenciarVipModal(discord.ui.Modal, title="Editar Cargo VIP"):
         elif field == "cor":
             self.valor = discord.ui.TextInput(label="Nova cor (hex, ex: #7C3AED)", max_length=7, required=True)
         elif field == "emoji":
-            self.valor = discord.ui.TextInput(label="Novo emoji do cargo", max_length=50, required=True)
+            self.valor = discord.ui.TextInput(
+                label="Emoji do cargo",
+                placeholder="Ex: 🎉  ou  <:nomeemoji:123456789>",
+                max_length=100,
+                required=True,
+            )
         self.add_item(self.valor)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -2747,8 +2804,9 @@ class GerenciarVipModal(discord.ui.Modal, title="Editar Cargo VIP"):
                 await role.edit(colour=discord.Colour(color_int), reason="gerenciarvip")
                 await interaction.response.send_message(f"Cor do cargo alterada para `#{hex_val.upper()}`.", ephemeral=True)
             elif self.field == "emoji":
-                await role.edit(unicode_emoji=valor, reason="gerenciarvip")
-                await interaction.response.send_message(f"Emoji do cargo alterado para {valor}.", ephemeral=True)
+                await interaction.response.defer(ephemeral=True)
+                ok, msg = await aplicar_emoji_cargo(role, valor, interaction.guild)
+                await interaction.followup.send(msg, ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("Sem permissao para editar o cargo.", ephemeral=True)
         except Exception as e:
@@ -2776,46 +2834,7 @@ class GerenciarVipView(discord.ui.View):
 
     @discord.ui.button(label="Alterar Emoji", style=discord.ButtonStyle.secondary, row=0)
     async def alterar_emoji(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Envie um emoji do Discord **neste canal agora** para definir como emoji do seu cargo.\n"
-            "Você tem 30 segundos. *(apenas emojis padrão do Discord são suportados)*",
-            ephemeral=True
-        )
-
-        def check(m):
-            return m.author.id == interaction.user.id and m.channel.id == interaction.channel.id
-
-        try:
-            msg = await interaction.client.wait_for("message", timeout=30.0, check=check)
-        except asyncio.TimeoutError:
-            try:
-                await interaction.followup.send("Tempo esgotado. Tente novamente.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        emoji_valor = msg.content.strip()
-
-        # Tenta apagar a mensagem do membro no chat
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-
-        gd = get_guild_data(interaction.guild.id)
-        vip_data = gd["vip_users"].get(str(interaction.user.id))
-        if not vip_data or not vip_data.get("role_id"):
-            return await interaction.followup.send("Voce nao tem cargo VIP.", ephemeral=True)
-        role = interaction.guild.get_role(int(vip_data["role_id"]))
-        if not role:
-            return await interaction.followup.send("Cargo nao encontrado.", ephemeral=True)
-        try:
-            await role.edit(unicode_emoji=emoji_valor, reason="gerenciarvip")
-            await interaction.followup.send(f"Emoji do cargo alterado para {emoji_valor}.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.followup.send("Sem permissao para editar o cargo.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"Erro ao definir emoji: {e}\nVerifique se enviou um emoji padrao do Discord.", ephemeral=True)
+        await interaction.response.send_modal(GerenciarVipModal("emoji"))
 
     @discord.ui.button(label="Ver Membros", style=discord.ButtonStyle.secondary, row=1)
     async def ver_membros(self, interaction: discord.Interaction, button: discord.ui.Button):
