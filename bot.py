@@ -6392,10 +6392,14 @@ async def _ig_handle_message(message: discord.Message, gd: dict) -> bool:
             pass
         return True
 
-    # Verifica se tem imagem
+    # Verifica se tem imagem (checa content_type e extensao do arquivo)
+    _IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".heic")
     image_attachment = None
     for att in message.attachments:
-        if att.content_type and att.content_type.startswith("image/"):
+        ct = att.content_type or ""
+        by_ct = ct.startswith("image/")
+        by_ext = att.filename.lower().endswith(_IMG_EXTS)
+        if by_ct or by_ext:
             image_attachment = att
             break
 
@@ -6415,7 +6419,7 @@ async def _ig_handle_message(message: discord.Message, gd: dict) -> bool:
 
     caption = message.content.strip() if message.content.strip() else None
     color = get_embed_color(message.guild)
-    post_data = {
+    post_data: dict = {
         "author_id": message.author.id,
         "author_name": message.author.display_name,
         "author_avatar": str(message.author.display_avatar.url),
@@ -6432,13 +6436,12 @@ async def _ig_handle_message(message: discord.Message, gd: dict) -> bool:
     except Exception:
         pass
 
+    # Envia sem view primeiro para obter o message ID real
     embed = _ig_build_embed(post_data)
-    view_placeholder = IgView(0, message.author.id)
-    sent = await message.channel.send(embed=embed, view=view_placeholder)
+    sent = await message.channel.send(embed=embed)
 
-    post_data_final = dict(post_data)
-    _ig_posts[sent.id] = post_data_final
-
+    # Agora temos o ID real — registra o post e edita com a view correta
+    _ig_posts[sent.id] = post_data
     real_view = IgView(sent.id, message.author.id)
     await sent.edit(view=real_view)
 
