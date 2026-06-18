@@ -238,6 +238,7 @@ def _make_default_guild_data():
         "instagram_roles": [],
         "giveaway_manager_roles": [],
         "help_category_emojis": {},
+        "mod_perm_roles": {},
     }
 
 def _apply_guild_defaults(gd: dict):
@@ -315,6 +316,7 @@ def _apply_guild_defaults(gd: dict):
         ("instagram_roles", []),
         ("giveaway_manager_roles", []),
         ("help_category_emojis", {}),
+        ("mod_perm_roles", {}),
     ]:
         if nk not in gd:
             gd[nk] = nv
@@ -561,6 +563,23 @@ def has_min_perm(guild, member):
         return True
     return member.top_role >= min_role
 
+_MOD_ACTIONS = ["ban", "kick", "mute", "castigo", "mutecall", "blacklist", "clear", "lock"]
+
+def _has_mod_perm(ctx, action: str) -> bool:
+    """Retorna True se o autor tem permissão (via cargo) para a ação de moderação."""
+    if not ctx.guild:
+        return False
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    gd = get_guild_data(ctx.guild.id)
+    staff_roles = gd.get("staff_roles", [])
+    if any(str(r.id) in staff_roles for r in ctx.author.roles):
+        return True
+    mod_roles = gd.get("mod_perm_roles", {}).get(action, [])
+    return any(str(r.id) in mod_roles for r in ctx.author.roles)
+
 def can_ban(guild, member):
     """Retorna True se o membro pode usar o comando de ban."""
     if member.id == guild.owner_id:
@@ -569,7 +588,10 @@ def can_ban(guild, member):
         return True
     gd = get_guild_data(guild.id)
     ban_roles = gd.get("ban_roles", [])
-    return any(str(r.id) in ban_roles for r in member.roles)
+    if any(str(r.id) in ban_roles for r in member.roles):
+        return True
+    mod_roles = gd.get("mod_perm_roles", {}).get("ban", [])
+    return any(str(r.id) in mod_roles for r in member.roles)
 
 # ─── Ativacao do Servidor ─────────────────────────────────────────────────────
 
@@ -2377,8 +2399,9 @@ async def ban(ctx, member: discord.Member = None, *, reason="Sem motivo informad
     await reply_and_delete(ctx, success_embed("Banimento", f"{member} foi banido.\nMotivo: {reason}", ctx.guild))
 
 @bot.command(name="kick")
-@commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member = None, *, reason="Sem motivo informado"):
+    if not _has_mod_perm(ctx, "kick") and not ctx.author.guild_permissions.kick_members:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     if is_protected(ctx.guild.id, member.id):
@@ -2398,8 +2421,9 @@ async def kick(ctx, member: discord.Member = None, *, reason="Sem motivo informa
     await reply_and_delete(ctx, success_embed("Expulsao", f"{member} foi expulso.\nMotivo: {reason}", ctx.guild))
 
 @bot.command(name="mute")
-@commands.has_permissions(moderate_members=True)
 async def mute(ctx, member: discord.Member = None, duration="10m", *, reason="Sem motivo informado"):
+    if not _has_mod_perm(ctx, "mute") and not ctx.author.guild_permissions.moderate_members:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     if is_protected(ctx.guild.id, member.id):
@@ -2428,8 +2452,9 @@ async def mute(ctx, member: discord.Member = None, duration="10m", *, reason="Se
     await reply_and_delete(ctx, success_embed("Mute", f"{member} foi mutado por {duration}.\nMotivo: {reason}", ctx.guild))
 
 @bot.command(name="castigo")
-@commands.has_permissions(manage_roles=True)
 async def castigo(ctx, member: discord.Member = None, *, reason="Sem motivo informado"):
+    if not _has_mod_perm(ctx, "castigo") and not ctx.author.guild_permissions.manage_roles:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     if is_protected(ctx.guild.id, member.id):
@@ -2468,8 +2493,9 @@ async def castigo(ctx, member: discord.Member = None, *, reason="Sem motivo info
     await reply_and_delete(ctx, success_embed("Castigo", f"{member} foi colocado em castigo.\nMotivo: {reason}", ctx.guild))
 
 @bot.command(name="clear")
-@commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int = None):
+    if not _has_mod_perm(ctx, "clear") and not ctx.author.guild_permissions.manage_messages:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not amount or amount < 1 or amount > 100:
         return await reply_and_delete(ctx, error_embed("Informe um numero entre 1 e 100.", ctx.guild))
     try:
@@ -2703,8 +2729,9 @@ async def helpcl(ctx):
 
 
 @bot.command(name="lock")
-@commands.has_permissions(manage_channels=True)
 async def lock(ctx):
+    if not _has_mod_perm(ctx, "lock") and not ctx.author.guild_permissions.manage_channels:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     try:
         await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
         await reply_and_delete(ctx, success_embed("Canal Trancado", f"{ctx.channel.name} foi trancado.", ctx.guild))
@@ -2712,8 +2739,9 @@ async def lock(ctx):
         await reply_and_delete(ctx, error_embed("Sem permissao para trancar este canal.", ctx.guild))
 
 @bot.command(name="unlock")
-@commands.has_permissions(manage_channels=True)
 async def unlock(ctx):
+    if not _has_mod_perm(ctx, "lock") and not ctx.author.guild_permissions.manage_channels:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     try:
         await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
         await reply_and_delete(ctx, success_embed("Canal Desbloqueado", f"{ctx.channel.name} foi desbloqueado.", ctx.guild))
@@ -2721,8 +2749,9 @@ async def unlock(ctx):
         await reply_and_delete(ctx, error_embed("Sem permissao para desbloquear este canal.", ctx.guild))
 
 @bot.command(name="nuke")
-@commands.has_permissions(manage_channels=True)
 async def nuke(ctx):
+    if not _has_mod_perm(ctx, "lock") and not ctx.author.guild_permissions.manage_channels:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     try:
         ch = ctx.channel
         ch_name = ch.name
@@ -2748,8 +2777,9 @@ async def nuke(ctx):
 # ─── Blacklist Commands ───────────────────────────────────────────────────────
 
 @bot.command(name="blacklist")
-@commands.has_permissions(administrator=True)
 async def blacklist_add(ctx, user: discord.User = None, *, reason="Sem motivo informado"):
+    if not _has_mod_perm(ctx, "blacklist") and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not user:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     add_blacklist(ctx.guild.id, user.id, reason, ctx.author.id, permanent=True)
@@ -2765,8 +2795,9 @@ async def blacklist_add(ctx, user: discord.User = None, *, reason="Sem motivo in
     await reply_and_delete(ctx, success_embed("Blacklist", f"{user.mention} adicionado a blacklist permanente.", ctx.guild))
 
 @bot.command(name="removeblacklist")
-@commands.has_permissions(administrator=True)
 async def blacklist_remove(ctx, user: discord.User = None):
+    if not _has_mod_perm(ctx, "blacklist") and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not user:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     if not remove_blacklist(ctx.guild.id, user.id):
@@ -2781,8 +2812,9 @@ async def blacklist_remove(ctx, user: discord.User = None):
     await reply_and_delete(ctx, success_embed("Blacklist Removida", f"{user.mention} removido da blacklist.", ctx.guild))
 
 @bot.command(name="removetempblacklist")
-@commands.has_permissions(administrator=True)
 async def temp_blacklist_remove(ctx, user: discord.User = None):
+    if not _has_mod_perm(ctx, "blacklist") and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not user:
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     gd = get_guild_data(ctx.guild.id)
@@ -3635,135 +3667,332 @@ async def status(ctx):
 
 def _build_help_embed(guild, p, category: str) -> discord.Embed:
     """Retorna a embed de help para a categoria escolhida."""
+
     if category == "inicio":
         e = create_embed(guild, "yov! — Início")
         e.description = (
-            "Bem-vindo ao **yov!**, bot de moderação e gestão do Discord.\n\n"
-            "Use o menu abaixo para navegar entre as categorias de comandos.\n\n"
+            "Bem-vindo ao **yov!**, seu bot completo de moderação e gestão.\n\n"
             f"Prefixo atual: `{p}`\n"
-            f"Suporte: <https://discord.gg/RyYZAJkw6k>"
+            f"Suporte: <https://discord.gg/RyYZAJkw6k>\n\n"
+            "Navegue pelo menu abaixo para ver todos os comandos disponíveis."
         )
+        e.add_field(name="Categorias disponíveis", value=(
+            "🛡️ Moderação · 🚫 Blacklist · 🔒 Anti-Ban\n"
+            "🌟 VIP · 🎫 Tickets · 👋 Boas-vindas\n"
+            "🎉 Sorteio · 📸 Instagram · 😀 Emojis\n"
+            "🎭 Cargos · 🔑 Permissões · ⚙️ Configuração\n"
+            "🧹 CL · 🔧 Utilitários"
+        ), inline=False)
         return e
 
     if category == "moderacao":
         e = create_embed(guild, "yov! — Moderação")
-        e.add_field(name="Punições", value=(
+        e.add_field(name="🔨 Banimentos", value=(
             f"`{p}ban @user [motivo]` — banir membro\n"
-            f"`{p}kick @user [motivo]` — expulsar membro\n"
-            f"`{p}mute @user <duracao> [motivo]` — timeout (ex: 10m, 1h)\n"
+            f"`{p}kick @user [motivo]` — expulsar membro"
+        ), inline=False)
+        e.add_field(name="🔇 Mute", value=(
+            f"`{p}mute @user <duração> [motivo]` — timeout (10m, 1h, 1d)\n"
             f"`{p}unmute @user` — remover timeout\n"
-            f"`{p}castigo @user [motivo]` — cargo castigo\n"
-            f"`{p}uncastigo @user` — remover castigo\n"
             f"`{p}mutecall @user [motivo]` — mute de voz\n"
+            f"`{p}unmutecall @user` — remover mute de voz"
         ), inline=False)
-        e.add_field(name="Canais", value=(
-            f"`{p}clear <1-100>` — apagar mensagens\n"
-            f"`{p}lock` — trancar canal\n"
+        e.add_field(name="⛔ Castigo", value=(
+            f"`{p}castigo @user [motivo]` — colocar em castigo\n"
+            f"`{p}uncastigo @user` — remover castigo"
+        ), inline=False)
+        e.add_field(name="📋 Canal & Mensagens", value=(
+            f"`{p}clear <1-100>` — apagar mensagens do canal\n"
+            f"`{p}lock` — trancar canal (ninguém envia)\n"
             f"`{p}unlock` — destrancar canal\n"
-            f"`{p}nuke` — recriar canal zerado\n"
-            f"`{p}cl` — apagar suas mensagens no canal\n"
-            f"`{p}helpcl` — ver gatilhos cl ativos"
+            f"`{p}nuke` — deletar e recriar canal zerado"
         ), inline=False)
-        e.add_field(name="Proteção", value=(
-            f"`{p}protected @user` — ativar/desativar proteção\n"
+        e.add_field(name="🛡️ Proteção", value=(
+            f"`{p}protected @user` — ativar/desativar proteção de membro\n"
             f"`{p}protectedlist` — listar membros protegidos"
+        ), inline=False)
+        e.add_field(name="🧹 Chat Limpo (CL)", value=(
+            f"`{p}cl` — apagar todas as suas mensagens no canal\n"
+            f"`{p}helpcl` — ver gatilhos cl ativos no servidor\n"
+            f"`{p}clcargo add/remove @cargo` — cargos que podem usar cl\n"
+            f"`{p}clcargo list` — listar cargos cl\n"
+            f"`{p}clpalavra add/remove <palavra>` — adicionar gatilho de texto\n"
+            f"`{p}clpalavra list` — listar gatilhos de texto"
         ), inline=False)
         return e
 
     if category == "blacklist":
         e = create_embed(guild, "yov! — Blacklist")
-        e.add_field(name="Comandos", value=(
-            f"`{p}blacklist @user [motivo]` — adicionar blacklist permanente\n"
-            f"`{p}removeblacklist @user` — remover da blacklist\n"
+        e.add_field(name="🚫 Comandos", value=(
+            f"`{p}blacklist @user [motivo]` — blacklist permanente\n"
+            f"`{p}removeblacklist @user` — remover da blacklist permanente\n"
             f"`{p}removetempblacklist @user` — remover blacklist temporária"
         ), inline=False)
-        e.add_field(name="Sobre", value=(
-            "Membros na blacklist são banidos automaticamente ao entrar no servidor.\n"
-            "Blacklist permanente: não expira.\n"
-            "Blacklist temporária: configurada pelo sistema anti-ban."
+        e.add_field(name="ℹ️ Como funciona", value=(
+            "Membros na blacklist são **banidos automaticamente** ao entrar no servidor.\n"
+            "• **Permanente:** nunca expira, precisa de remoção manual.\n"
+            "• **Temporária:** criada pelo sistema anti-ban, expira automaticamente."
+        ), inline=False)
+        e.add_field(name="🔑 Permissão necessária", value=(
+            f"Administrador **ou** cargo configurado com `{p}addperm @cargo blacklist`"
         ), inline=False)
         return e
 
     if category == "antiban":
         e = create_embed(guild, "yov! — Anti-Ban")
-        e.add_field(name="Comandos", value=(
-            f"`{p}addantban @user` — adicionar proteção anti-ban\n"
-            f"`{p}removeantban @user` — remover proteção\n"
-            f"`{p}antiraid` — painel de módulos anti-raid\n"
-            f"`{p}setantibanrole @cargo` — cargo automático ao entrar (anti-ban)\n"
+        e.add_field(name="🛡️ Anti-Ban Individual", value=(
+            f"`{p}addantban @user` — proteger usuário contra ban\n"
+            f"`{p}removeantban @user` — remover proteção anti-ban\n"
+            f"`{p}setantibanrole @cargo` — cargo dado automaticamente ao entrar"
         ), inline=False)
-        e.add_field(name="Anti-Raid", value=(
-            "• **Anti-Spam** — remove mensagens repetidas\n"
-            "• **Anti-Gore** — bloqueia imagens proibidas\n"
-            "• **Anti-Raid** — ativa modo lento sob flood de entradas\n"
-            "• **Anti-Disconnect** — pune quem desconecta em massa"
+        e.add_field(name="🚨 Anti-Raid", value=(
+            f"`{p}antiraid` — abrir painel de módulos anti-raid"
+        ), inline=False)
+        e.add_field(name="Módulos Anti-Raid", value=(
+            "• **Anti-Spam** — remove mensagens repetidas em sequência\n"
+            "• **Anti-Gore** — bloqueia imagens proibidas/nsfw\n"
+            "• **Anti-Raid** — ativa slowmode automático em flood de entradas\n"
+            "• **Anti-Disconnect** — pune quem desconecta membros em massa"
+        ), inline=False)
+        e.add_field(name="🔒 Limites de Ban", value=(
+            f"`{p}addpermban @cargo <N>` — limite de bans por semana para cargo\n"
+            f"`{p}editpermban @cargo <N>` — editar limite existente\n"
+            f"`{p}banlimits` — ver todos os limites configurados\n"
+            f"`{p}resetban @user` — resetar contador de bans de um membro"
+        ), inline=False)
+        e.add_field(name="👥 Cargos Ban", value=(
+            f"`{p}addbanrole @cargo` — cargo com permissão de ban\n"
+            f"`{p}removebanrole @cargo` — remover cargo de ban\n"
+            f"`{p}banroles` — listar cargos com permissão de ban"
+        ), inline=False)
+        return e
+
+    if category == "vip":
+        e = create_embed(guild, "yov! — VIP")
+        e.add_field(name="🌟 Gerenciar VIP de Membros", value=(
+            f"`{p}addvip @user @cargo [motivo]` — adicionar cargo VIP a membro\n"
+            f"`{p}removevip @user @cargo [motivo]` — remover cargo VIP de membro\n"
+            f"`{p}vipinfo @user` — ver informações de VIP de um membro\n"
+            f"`{p}gerenciarvip @user` — painel completo de gerência VIP"
+        ), inline=False)
+        e.add_field(name="⚙️ Configuração VIP", value=(
+            f"`{p}addpermvip @cargo` — cargo que pode gerenciar VIPs\n"
+            f"`{p}removepermvip @cargo` — remover permissão de gerência VIP\n"
+            f"`{p}setpermvip @cargo` — definir cargo gestor VIP (legado)\n"
+            f"`{p}addpermcargo @cargo` — adicionar cargo ao painel VIP\n"
+            f"`{p}removepermcargo @cargo` — remover cargo do painel VIP\n"
+            f"`{p}cargovipabaixo @cargo` — cargo de referência de posição VIP"
+        ), inline=False)
+        e.add_field(name="❓ Ajuda VIP", value=(
+            f"`{p}helpvip` — ver todos os comandos VIP detalhados"
+        ), inline=False)
+        return e
+
+    if category == "tickets":
+        e = create_embed(guild, "yov! — Tickets")
+        e.add_field(name="🎫 Criar Ticket", value=(
+            f"`{p}criarticket` — abrir painel de criação de ticket"
+        ), inline=False)
+        e.add_field(name="⚙️ Configuração", value=(
+            f"`{p}setticket #canal` — canal onde os tickets são criados\n"
+            f"`{p}addassumerole @cargo` — cargo que pode assumir/fechar tickets\n"
+            f"`{p}removeassumerole @cargo` — remover cargo de atendimento\n"
+            f"`{p}assumeroles` — listar cargos de atendimento"
+        ), inline=False)
+        e.add_field(name="ℹ️ Como funciona", value=(
+            "1. Membro usa `criarticket` ou clica no botão do canal\n"
+            "2. Bot cria canal privado entre membro e equipe\n"
+            "3. Staff assume o ticket e pode fechar ao finalizar"
+        ), inline=False)
+        return e
+
+    if category == "boasvindas":
+        e = create_embed(guild, "yov! — Boas-vindas")
+        e.add_field(name="👋 Configuração", value=(
+            f"`{p}boasvindas` — painel de configuração de boas-vindas\n"
+            f"  ↳ Define canal, mensagem e imagem de boas-vindas\n"
+            f"  ↳ Ativa/desativa o sistema"
+        ), inline=False)
+        e.add_field(name="Variáveis na mensagem", value=(
+            "`{user}` — menção ao novo membro\n"
+            "`{username}` — nome do usuário\n"
+            "`{server}` — nome do servidor\n"
+            "`{membercount}` — total de membros"
         ), inline=False)
         return e
 
     if category == "sorteio":
         e = create_embed(guild, "yov! — Sorteio")
-        e.add_field(name="Comandos", value=(
-            f"`{p}sorteio` — criar um novo sorteio (painel interativo)\n"
+        e.add_field(name="🎉 Comandos", value=(
+            f"`{p}sorteio` — criar novo sorteio (painel interativo)\n"
             f"`{p}setsorteiorole @cargo` — cargo que pode criar sorteios"
         ), inline=False)
-        e.add_field(name="Como funciona", value=(
-            "1. Digite `yov!sorteio` para abrir o painel\n"
-            "2. Preencha o prêmio, duração e nº de ganhadores\n"
-            "3. O bot cria o sorteio no canal atual\n"
-            "4. Membros reagem com 🎉 para participar\n"
-            "5. Ao encerrar, o bot sorteia e anuncia os vencedores"
+        e.add_field(name="📋 Como criar um sorteio", value=(
+            f"1. Digite `{p}sorteio` no canal desejado\n"
+            "2. Preencha o prêmio no modal\n"
+            "3. Informe a duração (ex: `1h`, `1d`, `7d`)\n"
+            "4. Informe o nº de ganhadores\n"
+            "5. Bot publica o sorteio — membros reagem com 🎉\n"
+            "6. Ao encerrar, bot sorteia e anuncia os vencedores"
+        ), inline=False)
+        e.add_field(name="🔑 Permissão", value=(
+            "Admin, dono, staff configurado **ou** cargo definido com `setsorteiorole`"
+        ), inline=False)
+        return e
+
+    if category == "instagram":
+        e = create_embed(guild, "yov! — Instagram")
+        e.add_field(name="📸 Publicar Post", value=(
+            f"`{p}instagram` — abrir painel de publicação\n"
+            f"  ↳ Anexe imagem, escreva legenda e publique no canal configurado"
+        ), inline=False)
+        e.add_field(name="⚙️ Configuração", value=(
+            f"`{p}setinstagramcanal #canal` — canal onde os posts são publicados\n"
+            f"`{p}setinstagramrole add @cargo` — cargo que pode publicar posts\n"
+            f"`{p}setinstagramrole remove @cargo` — remover cargo de publicação"
+        ), inline=False)
+        e.add_field(name="🔑 Permissão", value=(
+            "Admin, dono, staff configurado **ou** cargo definido com `setinstagramrole`"
         ), inline=False)
         return e
 
     if category == "emoji":
-        e = create_embed(guild, "yov! — Emoji do Servidor")
-        e.add_field(name="Comandos", value=(
-            f"`{p}addemoji <nome> [url]` — adiciona emoji ao servidor\n"
-            f"  ↳ Anexe uma imagem **ou** informe uma URL\n"
-            f"`{p}removeemoji <emoji>` — remove um emoji do servidor\n"
-            f"`{p}listemoji` — lista todos os emojis do servidor"
+        e = create_embed(guild, "yov! — Emojis do Servidor")
+        e.add_field(name="😀 Gerenciar Emojis", value=(
+            f"`{p}addemoji <nome> [url]` — adicionar emoji (ou envie imagem anexa)\n"
+            f"`{p}removeemoji <emoji>` — remover emoji do servidor\n"
+            f"`{p}listemoji` — listar todos os emojis do servidor"
+        ), inline=False)
+        e.add_field(name="🏷️ Emojis do Help", value=(
+            f"`{p}setcatemoji <categoria> <emoji>` — emoji personalizado na categoria do help\n"
+            f"`{p}listcatemoji` — ver emojis configurados\n"
+            f"  ↳ Ex: `{p}setcatemoji moderacao ⚔️`\n"
+            f"  ↳ Para limpar: `{p}setcatemoji moderacao limpar`"
         ), inline=False)
         e.add_field(name="Exemplos", value=(
-            f"`{p}addemoji pepe` — envia com imagem anexada\n"
+            f"`{p}addemoji pepe` — com imagem anexada\n"
             f"`{p}addemoji pepe https://i.imgur.com/abc.png`\n"
             f"`{p}removeemoji :pepe:`"
         ), inline=False)
-        e.add_field(name="Permissão necessária", value=(
-            "Gerenciar Expressões (Manage Emojis)"
+        return e
+
+    if category == "cargos":
+        e = create_embed(guild, "yov! — Cargos")
+        e.add_field(name="🎭 Painel de Cargos (Autoatribuição)", value=(
+            f"`{p}setarcargo` — criar painel de cargos com botões\n"
+            f"`{p}addcargopanel @cargo` — adicionar cargo ao painel\n"
+            f"`{p}removecargopanel @cargo` — remover cargo do painel\n"
+            f"`{p}listcargopanel` — listar cargos no painel"
+        ), inline=False)
+        e.add_field(name="🔑 Permissão de Gerência do Painel", value=(
+            f"`{p}addpermpanel @cargo` — cargo que pode gerenciar o painel\n"
+            f"`{p}removepermpanel @cargo` — remover permissão do painel"
+        ), inline=False)
+        e.add_field(name="🛡️ Cargos Staff", value=(
+            f"`{p}setstaffrole add @cargo` — adicionar cargo staff (acesso a todos os mod)\n"
+            f"`{p}setstaffrole remove @cargo` — remover cargo staff\n"
+            f"`{p}setstaffrole list` — listar cargos staff"
+        ), inline=False)
+        e.add_field(name="⚙️ Cargos Especiais", value=(
+            f"`{p}setmuterole @cargo` — cargo de mute (mute call)\n"
+            f"`{p}setcastigorole @cargo` — cargo aplicado no castigo\n"
+            f"`{p}setmutecallrole @cargo` — cargo de mute de voz\n"
+            f"`{p}setantibanrole @cargo` — cargo dado ao entrar (anti-ban)"
+        ), inline=False)
+        return e
+
+    if category == "permissoes":
+        e = create_embed(guild, "yov! — Permissões de Moderação")
+        acoes_str = " · ".join(f"`{a}`" for a in _MOD_ACTIONS)
+        e.add_field(name="🔑 Comandos", value=(
+            f"`{p}addperm @cargo <ação>` — dar permissão de ação ao cargo\n"
+            f"`{p}removeperm @cargo <ação>` — remover permissão de ação\n"
+            f"`{p}listperm` — ver todas as permissões configuradas"
+        ), inline=False)
+        e.add_field(name="⚡ Ações disponíveis", value=acoes_str, inline=False)
+        e.add_field(name="Exemplos", value=(
+            f"`{p}addperm @Moderador ban` — Moderadores podem usar ban\n"
+            f"`{p}addperm @Helper mute` — Helpers podem mutar\n"
+            f"`{p}addperm @Staff castigo` — Staff pode colocar em castigo\n"
+            f"`{p}removeperm @Helper mute` — Remover permissão de mute\n"
+            f"`{p}listperm` — ver tudo que está configurado"
+        ), inline=False)
+        e.add_field(name="ℹ️ Prioridade", value=(
+            "**Dono > Administrador > Staff (setstaffrole) > Cargo configurado (addperm) > Permissão Discord padrão**"
         ), inline=False)
         return e
 
     if category == "configuracao":
         e = create_embed(guild, "yov! — Configuração")
-        e.add_field(name="Servidor (Dono)", value=(
-            f"`{p}setprefix <novo>` — alterar prefixo\n"
-            f"`{p}setcolor <hex>` — cor das embeds\n"
-            f"`{p}resetcolor` — resetar cor\n"
-            f"`{p}setperm @cargo` — cargo mínimo para usar bot\n"
-            f"`{p}antiraid` — módulos anti-raid\n"
-            f"`{p}owner` — painel de ações\n"
-            f"`{p}createlogs / deletelogs / clearlogs` — canais de log"
+        e.add_field(name="🖥️ Servidor", value=(
+            f"`{p}setprefix <novo>` — alterar prefixo do bot\n"
+            f"`{p}setcolor <#hex>` — cor das embeds (ex: `#7c3aed`)\n"
+            f"`{p}resetcolor` — resetar cor para padrão\n"
+            f"`{p}setperm @cargo` — cargo mínimo para usar o bot\n"
+            f"`{p}owner` — painel de ações do dono\n"
+            f"`{p}enviarmsg #canal <mensagem>` — enviar mensagem como bot"
         ), inline=False)
-        e.add_field(name="Cargos Staff", value=(
-            f"`{p}setstaffrole add @cargo` — adicionar cargo staff\n"
-            f"`{p}setstaffrole remove @cargo` — remover cargo staff\n"
-            f"`{p}setmuterole @cargo` — cargo de mute (voz)\n"
-            f"`{p}setcastigorole @cargo` — cargo de castigo\n"
-            f"`{p}setmutecallrole @cargo` — cargo de mute call\n"
-            f"`{p}setantibanrole @cargo` — cargo dado ao entrar\n"
+        e.add_field(name="📋 Logs", value=(
+            f"`{p}createlogs` — criar canais de log automaticamente\n"
+            f"`{p}deletelogs` — remover canais de log\n"
+            f"`{p}clearlogs` — limpar todos os logs"
         ), inline=False)
-        e.add_field(name="Instagram & Sorteio", value=(
-            f"`{p}setinstagramcanal #canal` — canal de posts do Instagram\n"
-            f"`{p}setinstagramrole @cargo` — cargo para ver Instagram\n"
-            f"`{p}setsorteiorole @cargo` — cargo para criar sorteios\n"
+        e.add_field(name="🔑 Permissões de Dono", value=(
+            f"`{p}addownerperm @cargo` — dar permissão de dono a cargo\n"
+            f"`{p}removeownerperm @cargo` — remover permissão de dono\n"
+            f"`{p}listownerperm` — listar cargos com perm de dono"
         ), inline=False)
-        e.add_field(name="Ban & VIP", value=(
-            f"`{p}addbanrole @cargo` — cargo com perm de ban\n"
-            f"`{p}removebanrole @cargo` — remover perm de ban\n"
-            f"`{p}addpermban @cargo <N>` — limite de bans/semana\n"
-            f"`{p}setpermvip @cargo` — cargo gestor de VIP\n"
-            f"`{p}cargovipabaixo @cargo` — referência de posição VIP\n"
-            f"`{p}addownerperm @cargo` — permissão de dono a cargo"
+        e.add_field(name="🚨 Anti-Raid", value=(
+            f"`{p}antiraid` — painel de módulos anti-raid\n"
+            f"`{p}addpermban @cargo <N>` — limite de bans por semana\n"
+            f"`{p}editpermban @cargo <N>` — editar limite existente\n"
+            f"`{p}banlimits` — ver limites configurados\n"
+            f"`{p}resetban @user` — resetar contador de bans"
+        ), inline=False)
+        e.add_field(name="📸 Instagram & 🎉 Sorteio", value=(
+            f"`{p}setinstagramcanal #canal` — canal dos posts\n"
+            f"`{p}setinstagramrole add @cargo` — cargo de publicação\n"
+            f"`{p}setsorteiorole @cargo` — cargo para criar sorteios"
+        ), inline=False)
+        return e
+
+    if category == "cl":
+        e = create_embed(guild, "yov! — Chat Limpo (CL)")
+        e.add_field(name="🧹 Usar CL", value=(
+            f"`{p}cl` — apagar **todas** as suas mensagens no canal atual\n"
+            f"`{p}helpcl` — ver gatilhos de texto ativos"
+        ), inline=False)
+        e.add_field(name="⚙️ Configurar CL (Admin)", value=(
+            f"`{p}clcargo add @cargo` — adicionar cargo que pode usar cl\n"
+            f"`{p}clcargo remove @cargo` — remover cargo\n"
+            f"`{p}clcargo list` — listar cargos com acesso ao cl\n"
+            f"`{p}clpalavra add <palavra>` — adicionar gatilho de texto\n"
+            f"`{p}clpalavra remove <palavra>` — remover gatilho\n"
+            f"`{p}clpalavra list` — listar todos os gatilhos"
+        ), inline=False)
+        e.add_field(name="ℹ️ Como funciona", value=(
+            "Quando um membro digita um dos gatilhos configurados, "
+            "o bot apaga **automaticamente** todas as mensagens desse membro no canal. "
+            "Útil para auto-limpeza de canais de comandos."
+        ), inline=False)
+        return e
+
+    if category == "utilidades":
+        e = create_embed(guild, "yov! — Utilitários")
+        e.add_field(name="🔧 Comandos Gerais", value=(
+            f"`{p}help` — abrir menu de ajuda (este menu)\n"
+            f"`{p}helpvip` — ajuda completa do sistema VIP\n"
+            f"`{p}status` — status e informações do bot\n"
+            f"`{p}ping` — latência do bot\n"
+            f"`{p}painel` — painel de configuração rápida do servidor\n"
+            f"`{p}ativar <chave>` — ativar o bot no servidor\n"
+            f"`{p}reiniciar` — reiniciar o bot (apenas dono)"
+        ), inline=False)
+        e.add_field(name="📊 Bot Stats", value=(
+            "Use `yov!status` para ver:\n"
+            "• Servidores ativos\n"
+            "• Latência\n"
+            "• Versão e uptime"
         ), inline=False)
         return e
 
@@ -3773,13 +4002,21 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
 
 
 _HELP_CATEGORIES = [
-    ("inicio",       "Início",       "Sobre o bot e informações gerais"),
-    ("moderacao",    "Moderação",    "Ban, kick, mute, castigo, clear..."),
-    ("blacklist",    "Blacklist",    "Comandos de blacklist"),
-    ("antiban",      "Anti-Ban",     "Anti-ban, anti-raid e proteções"),
-    ("sorteio",      "Sorteio",      "Criar e gerenciar sorteios"),
-    ("emoji",        "Emojis",       "Adicionar e remover emojis do servidor"),
-    ("configuracao", "Configuração", "Configurar o bot no servidor"),
+    ("inicio",       "Início",          "Sobre o bot e navegação"),
+    ("moderacao",    "Moderação",        "Ban, kick, mute, castigo, clear, lock, cl..."),
+    ("blacklist",    "Blacklist",        "Banir membros automaticamente ao entrar"),
+    ("antiban",      "Anti-Ban",         "Proteção individual, anti-raid, limites de ban"),
+    ("vip",          "VIP",              "Gerenciar cargos VIP de membros"),
+    ("tickets",      "Tickets",          "Sistema de tickets de suporte"),
+    ("boasvindas",   "Boas-vindas",      "Mensagem de boas-vindas ao entrar"),
+    ("sorteio",      "Sorteio",          "Criar e gerenciar sorteios com reações"),
+    ("instagram",    "Instagram",        "Publicar posts no canal do servidor"),
+    ("emoji",        "Emojis",           "Adicionar, remover e listar emojis"),
+    ("cargos",       "Cargos",           "Painel de cargos e cargos especiais"),
+    ("permissoes",   "Permissões",       "Dar permissão de mod a cargos específicos"),
+    ("configuracao", "Configuração",     "Prefixo, cor, logs, anti-raid e mais"),
+    ("cl",           "CL",               "Chat Limpo — apagar mensagens no canal"),
+    ("utilidades",   "Utilitários",      "Status, ping, painel, ativar, help"),
 ]
 
 class HelpSelect(discord.ui.Select):
@@ -5885,8 +6122,9 @@ def db_add_post(guild_id, channel_id, author_id, image_url, caption=None, messag
 # ── Unmute ────────────────────────────────────────────────────────────────────
 
 @bot.command(name="unmute")
-@commands.has_permissions(moderate_members=True)
 async def unmute(ctx, member: discord.Member = None):
+    if not _has_mod_perm(ctx, "mute") and not ctx.author.guild_permissions.moderate_members:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
     try:
@@ -5907,8 +6145,9 @@ async def unmute(ctx, member: discord.Member = None):
 # ── Uncastigo ─────────────────────────────────────────────────────────────────
 
 @bot.command(name="uncastigo")
-@commands.has_permissions(manage_roles=True)
 async def uncastigo(ctx, member: discord.Member = None):
+    if not _has_mod_perm(ctx, "castigo") and not ctx.author.guild_permissions.manage_roles:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
     gd = get_guild_data(ctx.guild.id)
@@ -5939,8 +6178,9 @@ async def uncastigo(ctx, member: discord.Member = None):
 # ── MuteCall ──────────────────────────────────────────────────────────────────
 
 @bot.command(name="mutecall")
-@commands.has_permissions(mute_members=True)
 async def mutecall(ctx, member: discord.Member = None, *, reason="Sem motivo informado"):
+    if not _has_mod_perm(ctx, "mutecall") and not ctx.author.guild_permissions.mute_members:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
     if is_protected(ctx.guild.id, member.id):
@@ -5977,8 +6217,9 @@ async def mutecall(ctx, member: discord.Member = None, *, reason="Sem motivo inf
     await reply_and_delete(ctx, success_embed("MuteCall", f"{member} foi mutado no canal de voz.\nMotivo: {reason}", ctx.guild))
 
 @bot.command(name="unmutecall")
-@commands.has_permissions(mute_members=True)
 async def unmutecall(ctx, member: discord.Member = None):
+    if not _has_mod_perm(ctx, "mutecall") and not ctx.author.guild_permissions.mute_members:
+        return await reply_and_delete(ctx, error_embed("Voce nao tem permissao para usar este comando.", ctx.guild))
     if not member:
         return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
     gd = get_guild_data(ctx.guild.id)
@@ -6274,6 +6515,86 @@ async def setinstagramrole(ctx, acao: str = None, cargo: discord.Role = None):
             return await reply_and_delete(ctx, error_embed("Cargo não está na lista.", ctx.guild))
         update_guild_data(ctx.guild.id, gd)
         await reply_and_delete(ctx, success_embed("Instagram Role", f"{cargo.mention} removido.", ctx.guild))
+
+@bot.command(name="addperm")
+async def addperm(ctx, cargo: discord.Role = None, acao: str = None):
+    """Adiciona um cargo com permissão para uma ação de moderação."""
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono do servidor.", ctx.guild))
+    p = await get_prefix(bot, ctx.message)
+    acoes_str = ", ".join(f"`{a}`" for a in _MOD_ACTIONS)
+    if not cargo or not acao:
+        return await reply_and_delete(ctx, error_embed(
+            f"Use: `{p}addperm @cargo <ação>`\n\n"
+            f"**Ações disponíveis:** {acoes_str}", ctx.guild))
+    acao = acao.lower()
+    if acao not in _MOD_ACTIONS:
+        return await reply_and_delete(ctx, error_embed(
+            f"Ação inválida.\n**Ações disponíveis:** {acoes_str}", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    mod_roles = gd.setdefault("mod_perm_roles", {})
+    lista = mod_roles.setdefault(acao, [])
+    if str(cargo.id) not in lista:
+        lista.append(str(cargo.id))
+        update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed(
+        "Permissão Adicionada",
+        f"{cargo.mention} agora pode usar `{p}{acao}` e comandos relacionados.", ctx.guild))
+
+
+@bot.command(name="removeperm")
+async def removeperm(ctx, cargo: discord.Role = None, acao: str = None):
+    """Remove a permissão de um cargo para uma ação de moderação."""
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono do servidor.", ctx.guild))
+    p = await get_prefix(bot, ctx.message)
+    if not cargo or not acao:
+        return await reply_and_delete(ctx, error_embed(
+            f"Use: `{p}removeperm @cargo <ação>`", ctx.guild))
+    acao = acao.lower()
+    if acao not in _MOD_ACTIONS:
+        return await reply_and_delete(ctx, error_embed(
+            f"Ação inválida. Disponíveis: {', '.join(_MOD_ACTIONS)}", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    lista = gd.get("mod_perm_roles", {}).get(acao, [])
+    if str(cargo.id) not in lista:
+        return await reply_and_delete(ctx, error_embed("Este cargo não tem essa permissão.", ctx.guild))
+    lista.remove(str(cargo.id))
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed(
+        "Permissão Removida",
+        f"{cargo.mention} não pode mais usar `{p}{acao}`.", ctx.guild))
+
+
+@bot.command(name="listperm")
+async def listperm(ctx):
+    """Lista todos os cargos com permissões de moderação configuradas."""
+    gd = get_guild_data(ctx.guild.id)
+    mod_roles = gd.get("mod_perm_roles", {})
+    staff_roles = gd.get("staff_roles", [])
+    embed = create_embed(ctx.guild, "Permissões de Moderação")
+    # Staff roles (acesso a tudo)
+    if staff_roles:
+        embed.add_field(
+            name="Staff (acesso total)",
+            value="\n".join(f"<@&{r}>" for r in staff_roles) or "Nenhum",
+            inline=False)
+    # Permissões por ação
+    tem_algo = False
+    for acao in _MOD_ACTIONS:
+        roles = mod_roles.get(acao, [])
+        if roles:
+            tem_algo = True
+            embed.add_field(
+                name=f"`{acao}`",
+                value="\n".join(f"<@&{r}>" for r in roles),
+                inline=True)
+    if not tem_algo and not staff_roles:
+        embed.description = "Nenhuma permissão configurada. Apenas admins e dono podem usar os comandos."
+    p = await get_prefix(bot, ctx.message)
+    embed.set_footer(text=f"Use {p}addperm @cargo <ação> para configurar")
+    await reply_and_delete(ctx, embed)
+
 
 @bot.command(name="setsorteiorole")
 async def setsorteiorole(ctx, acao: str = None, cargo: discord.Role = None):
