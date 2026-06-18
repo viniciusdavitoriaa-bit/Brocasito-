@@ -107,10 +107,60 @@ def init_db_postgres():
                 if guilds:
                     print(f"[DB] Migrados {len(guilds)} servidores da tabela antiga.", flush=True)
 
+        # Tabela de punições (mute/castigo/mutecall com expiração)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS punishments (
+                id          SERIAL      PRIMARY KEY,
+                guild_id    TEXT        NOT NULL,
+                user_id     TEXT        NOT NULL,
+                type        TEXT        NOT NULL,
+                role_id     TEXT,
+                expires_at  TIMESTAMPTZ,
+                moderator_id TEXT,
+                reason      TEXT,
+                active      BOOLEAN     DEFAULT TRUE,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_punishments_guild_user ON punishments(guild_id, user_id, active)")
+
+        # Tabela de posts do Instagram
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id          SERIAL      PRIMARY KEY,
+                guild_id    TEXT        NOT NULL,
+                channel_id  TEXT        NOT NULL,
+                message_id  TEXT,
+                author_id   TEXT        NOT NULL,
+                image_url   TEXT        NOT NULL,
+                caption     TEXT,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        # Tabela de sorteios
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS giveaways (
+                id          SERIAL      PRIMARY KEY,
+                guild_id    TEXT        NOT NULL,
+                channel_id  TEXT        NOT NULL,
+                message_id  TEXT,
+                host_id     TEXT        NOT NULL,
+                prize       TEXT        NOT NULL,
+                winners_count INT       DEFAULT 1,
+                ends_at     TIMESTAMPTZ NOT NULL,
+                ended       BOOLEAN     DEFAULT FALSE,
+                winners     TEXT[]      DEFAULT '{}',
+                entries     TEXT[]      DEFAULT '{}',
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_giveaways_active ON giveaways(guild_id, ended)")
+
         conn.commit()
         cur.close()
         conn.close()
-        print("[DB] PostgreSQL conectado. Tabela guild_data pronta.", flush=True)
+        print("[DB] PostgreSQL conectado. Tabelas prontas.", flush=True)
     except Exception as e:
         print(f"[ERRO] init_db_postgres: {e}", flush=True)
 
@@ -178,6 +228,15 @@ def _make_default_guild_data():
             "description": "Olá, {user}! Seja bem-vindo(a) ao **{server}**!\nVocê é o membro de número **{count}**.",
             "color": None,
         },
+        # ── Novos campos ──────────────────────────────────────────────────────
+        "staff_roles": [],
+        "mute_role_id": None,
+        "castigo_role_id": None,
+        "mute_call_role_id": None,
+        "antiban_role_id": None,
+        "instagram_channel_id": None,
+        "instagram_roles": [],
+        "giveaway_manager_roles": [],
     }
 
 def _apply_guild_defaults(gd: dict):
@@ -244,6 +303,20 @@ def _apply_guild_defaults(gd: dict):
             if wk not in wc:
                 wc[wk] = wv
                 changed = True
+    # Novos campos
+    for nk, nv in [
+        ("staff_roles", []),
+        ("mute_role_id", None),
+        ("castigo_role_id", None),
+        ("mute_call_role_id", None),
+        ("antiban_role_id", None),
+        ("instagram_channel_id", None),
+        ("instagram_roles", []),
+        ("giveaway_manager_roles", []),
+    ]:
+        if nk not in gd:
+            gd[nk] = nv
+            changed = True
     return gd, changed
 
 # ─── load_db / save_db (fallback arquivo local) ───────────────────────────────
@@ -2359,7 +2432,12 @@ async def castigo(ctx, member: discord.Member = None, *, reason="Sem motivo info
         return await reply_and_delete(ctx, error_embed("Mencione um usuario valido.", ctx.guild))
     if is_protected(ctx.guild.id, member.id):
         return await reply_and_delete(ctx, error_embed("Este membro esta protegido.", ctx.guild))
-    castigo_role = discord.utils.get(ctx.guild.roles, name="castigo")
+    # Busca o cargo configurado; fallback: cria/usa "castigo"
+    gd = get_guild_data(ctx.guild.id)
+    castigo_rid = gd.get("castigo_role_id")
+    castigo_role = ctx.guild.get_role(int(castigo_rid)) if castigo_rid else None
+    if not castigo_role:
+        castigo_role = discord.utils.get(ctx.guild.roles, name="castigo")
     if not castigo_role:
         try:
             castigo_role = await ctx.guild.create_role(name="castigo", colour=discord.Colour(0x555555))
@@ -3553,171 +3631,160 @@ async def status(ctx):
     embed.add_field(name="Riscos", value=f"{bl_count} na blacklist" if bl_count > 0 else "Nenhum risco", inline=False)
     await reply_and_delete(ctx, embed)
 
-def _build_help_pages(guild, p):
-    pages = []
+def _build_help_embed(guild, p, category: str) -> discord.Embed:
+    """Retorna a embed de help para a categoria escolhida."""
+    if category == "inicio":
+        e = create_embed(guild, "yov! — Início")
+        e.description = (
+            "Bem-vindo ao **yov!**, bot de moderação e gestão do Discord.\n\n"
+            "Use o menu abaixo para navegar entre as categorias de comandos.\n\n"
+            f"Prefixo atual: `{p}`\n"
+            f"Suporte: <https://discord.gg/RyYZAJkw6k>"
+        )
+        return e
 
-    e1 = create_embed(guild, "Comandos do Bot YOV  —  Pagina 1/5")
-    e1.add_field(name="─── Moderacao ───", value=(
-        f"`{p}ban @user [motivo]` — banir membro\n"
-        f"`{p}kick @user [motivo]` — expulsar membro\n"
-        f"`{p}mute @user <duracao> [motivo]` — mutar (ex: 10m, 1h, 1d)\n"
-        f"`{p}castigo @user [motivo]` — colocar em castigo\n"
-        f"`{p}clear <1-100>` — apagar mensagens\n"
-        f"`{p}lock` — trancar canal\n"
-        f"`{p}unlock` — destrancar canal\n"
-        f"`{p}nuke` — recriar canal zerado\n"
-        f"`{p}cl` — apagar todas as suas mensagens no canal\n"
-        f"`{p}helpcl` — ver gatilhos cl ativos (apenas cargo CL)"
-    ), inline=False)
-    e1.add_field(name="─── Protecao ───", value=(
-        f"`{p}protected @user` — ativar/desativar protecao\n"
-        f"`{p}protectedlist` — listar membros protegidos"
-    ), inline=False)
-    e1.add_field(name="─── Blacklist ───", value=(
-        f"`{p}blacklist @user [motivo]` — adicionar a blacklist permanente\n"
-        f"`{p}removeblacklist @user` — remover da blacklist\n"
-        f"`{p}removetempblacklist @user` — remover blacklist temporaria"
-    ), inline=False)
-    pages.append(e1)
+    if category == "moderacao":
+        e = create_embed(guild, "yov! — Moderação")
+        e.add_field(name="Punições", value=(
+            f"`{p}ban @user [motivo]` — banir membro\n"
+            f"`{p}kick @user [motivo]` — expulsar membro\n"
+            f"`{p}mute @user <duracao> [motivo]` — timeout (ex: 10m, 1h)\n"
+            f"`{p}unmute @user` — remover timeout\n"
+            f"`{p}castigo @user [motivo]` — cargo castigo\n"
+            f"`{p}uncastigo @user` — remover castigo\n"
+            f"`{p}mutecall @user [motivo]` — mute de voz\n"
+        ), inline=False)
+        e.add_field(name="Canais", value=(
+            f"`{p}clear <1-100>` — apagar mensagens\n"
+            f"`{p}lock` — trancar canal\n"
+            f"`{p}unlock` — destrancar canal\n"
+            f"`{p}nuke` — recriar canal zerado\n"
+            f"`{p}cl` — apagar suas mensagens no canal\n"
+            f"`{p}helpcl` — ver gatilhos cl ativos"
+        ), inline=False)
+        e.add_field(name="Proteção", value=(
+            f"`{p}protected @user` — ativar/desativar proteção\n"
+            f"`{p}protectedlist` — listar membros protegidos"
+        ), inline=False)
+        return e
 
-    e2 = create_embed(guild, "Comandos do Bot YOV  —  Pagina 2/5")
-    e2.add_field(name="─── Sistema VIP (Administracao) ───", value=(
-        f"`{p}addpermvip @user` — dar status VIP ao membro (cria cargo)\n"
-        f"`{p}removepermvip @user` — remover VIP e deletar cargo\n"
-        f"`{p}setpermvip @cargo` — definir cargo que pode gerenciar VIPs\n"
-        f"`{p}cargovipabaixo @cargo` — definir o cargo que fica acima de todos os cargos VIP\n"
-        f"`{p}addpermcargo @cargo` — adicionar cargo a lista de gestores VIP\n"
-        f"`{p}removepermcargo @cargo` — remover cargo da lista\n"
-        f"`{p}vipinfo [@user]` — ver informacoes VIP\n"
-        f"`{p}banlimits` — ver contadores de ban por cargo\n"
-        f"`{p}resetban` — resetar todos os contadores\n"
-        f"`{p}addpermban @cargo <N>` — limite de bans por semana\n"
-        f"`{p}editpermban @cargo <N>` — editar limite de bans\n\n"
-        f"Para comandos de membro VIP, use `{p}helpvip`."
-    ), inline=False)
-    pages.append(e2)
+    if category == "blacklist":
+        e = create_embed(guild, "yov! — Blacklist")
+        e.add_field(name="Comandos", value=(
+            f"`{p}blacklist @user [motivo]` — adicionar blacklist permanente\n"
+            f"`{p}removeblacklist @user` — remover da blacklist\n"
+            f"`{p}removetempblacklist @user` — remover blacklist temporária"
+        ), inline=False)
+        e.add_field(name="Sobre", value=(
+            "Membros na blacklist são banidos automaticamente ao entrar no servidor.\n"
+            "Blacklist permanente: não expira.\n"
+            "Blacklist temporária: configurada pelo sistema anti-ban."
+        ), inline=False)
+        return e
 
-    e3 = create_embed(guild, "Comandos do Bot YOV  —  Pagina 3/5")
-    e3.add_field(name="─── Tickets ───", value=(
-        f"`{p}criarticket` — envia o painel de tickets no canal\n"
-        f"`{p}setticket` — ver configuracao atual\n"
-        f"`{p}setticket titulo <texto>` — titulo do painel\n"
-        f"`{p}setticket descricao <texto>` — descricao do painel\n"
-        f"`{p}setticket abertura <texto>` — embed dentro do ticket (use {{user}})\n"
-        f"`{p}setticket categoria #cat` — categoria dos canais\n"
-        f"`{p}setticket suporte @cargo` — adicionar/remover suporte\n"
-        f"`{p}setticket opcao add <emoji> <nome>` — opcao no dropdown\n"
-        f"`{p}setticket opcao remove <num>` — remover opcao\n"
-        f"`{p}setticket opcao limpar` — remover todas as opcoes"
-    ), inline=False)
-    e3.add_field(name="─── Tickets — Permissoes e Botoes ───", value=(
-        f"`{p}addassumerole @cargo` — permissao de assumir tickets\n"
-        f"`{p}removeassumerole @cargo` — remover permissao\n"
-        f"`{p}assumeroles` — listar cargos configurados\n\n"
-        f"**Botoes no ticket:**\n"
-        f"Fechar Ticket — encerra e gera transcript\n"
-        f"Assumir Ticket — marca quem assumiu\n"
-        f"Painel — adicionar/remover membros, passar ticket"
-    ), inline=False)
-    pages.append(e3)
+    if category == "antiban":
+        e = create_embed(guild, "yov! — Anti-Ban")
+        e.add_field(name="Comandos", value=(
+            f"`{p}addantban @user` — adicionar proteção anti-ban\n"
+            f"`{p}removeantban @user` — remover proteção\n"
+            f"`{p}antiraid` — painel de módulos anti-raid\n"
+            f"`{p}setantibanrole @cargo` — cargo automático ao entrar (anti-ban)\n"
+        ), inline=False)
+        e.add_field(name="Anti-Raid", value=(
+            "• **Anti-Spam** — remove mensagens repetidas\n"
+            "• **Anti-Gore** — bloqueia imagens proibidas\n"
+            "• **Anti-Raid** — ativa modo lento sob flood de entradas\n"
+            "• **Anti-Disconnect** — pune quem desconecta em massa"
+        ), inline=False)
+        return e
 
-    e4 = create_embed(guild, "Comandos do Bot YOV  —  Pagina 4/5")
-    e4.add_field(name="─── Boas-vindas ───", value=(
-        f"`{p}boasvindas` — ver configuracao atual\n"
-        f"`{p}boasvindas canal #canal` — definir canal\n"
-        f"`{p}boasvindas ativar` — ativar mensagem automatica\n"
-        f"`{p}boasvindas desativar` — desativar\n"
-        f"`{p}boasvindas cor <hex>` — cor do embed (ou `reset`)\n"
-        f"`{p}boasvindas titulo <texto>` — titulo (use {{user}}, {{server}}, {{count}})\n"
-        f"`{p}boasvindas descricao <texto>` — descricao da embed"
-    ), inline=False)
-    e4.add_field(name="─── Painel de Cargos ───", value=(
-        f"`{p}setarcargo @membro` — abrir painel para setar cargos\n"
-        f"`{p}addcargopanel @cargo [...]` — adicionar cargos ao painel\n"
-        f"`{p}removecargopanel @cargo [...]` — remover cargos do painel\n"
-        f"`{p}addpermpanel @cargo [...]` — dar permissao de usar o painel\n"
-        f"`{p}removepermpanel @cargo [...]` — remover permissao do painel\n"
-        f"`{p}listcargopanel` — listar configuracao do painel"
-    ), inline=False)
-    e4.add_field(name="─── Geral ───", value=(
-        f"`{p}status` — ver status do servidor\n"
-        f"`{p}ping` — latencia do bot\n"
-        f"`{p}help` — exibir esta mensagem\n"
-        f"`{p}helpvip` — comandos exclusivos para membros VIP"
-    ), inline=False)
-    pages.append(e4)
+    if category == "sorteio":
+        e = create_embed(guild, "yov! — Sorteio")
+        e.add_field(name="Comandos", value=(
+            f"`{p}sorteio` — criar um novo sorteio (painel interativo)\n"
+            f"`{p}setsorteiorole @cargo` — cargo que pode criar sorteios"
+        ), inline=False)
+        e.add_field(name="Como funciona", value=(
+            "1. Digite `yov!sorteio` para abrir o painel\n"
+            "2. Preencha o prêmio, duração e nº de ganhadores\n"
+            "3. O bot cria o sorteio no canal atual\n"
+            "4. Membros reagem com 🎉 para participar\n"
+            "5. Ao encerrar, o bot sorteia e anuncia os vencedores"
+        ), inline=False)
+        return e
 
-    e5 = create_embed(guild, "Comandos do Bot YOV  —  Pagina 5/5")
-    e5.add_field(name="─── Exclusivo do Dono do Servidor ───", value=(
-        f"`{p}antiraid` — painel de modulos anti-raid\n"
-        f"`{p}owner` — painel de acoes do servidor\n"
-        f"`{p}enviarmsg [#cor] <msg>` — enviar embed por DM a todos\n"
-        f"`{p}setprefix <novo>` — alterar prefixo do bot\n"
-        f"`{p}setperm @cargo` — cargo minimo para usar o bot\n"
-        f"`{p}addbanrole @cargo` — cargo com permissao de ban\n"
-        f"`{p}removebanrole @cargo` — remover permissao de ban\n"
-        f"`{p}banroles` — listar cargos com permissao de ban\n"
-        f"`{p}createlogs` — criar canais de log\n"
-        f"`{p}deletelogs` — deletar canais de log\n"
-        f"`{p}clearlogs` — limpar mensagens dos logs\n"
-        f"`{p}setcolor <hex>` — cor das embeds\n"
-        f"`{p}resetcolor` — resetar cor das embeds"
-    ), inline=False)
-    e5.add_field(name="─── Configuracao do CL (Dono/Admin) ───", value=(
-        f"`{p}clcargo add @cargo` — permitir cargo usar cl\n"
-        f"`{p}clcargo remove @cargo` — remover permissao cl do cargo\n"
-        f"`{p}clcargo lista` — listar cargos com permissao cl\n"
-        f"`{p}clpalavra add <palavra>` — criar gatilho cl\n"
-        f"`{p}clpalavra remove <palavra>` — remover gatilho\n"
-        f"`{p}clpalavra limpar` — remover todos os gatilhos\n"
-        f"`{p}clpalavra lista` — ver gatilhos cadastrados"
-    ), inline=False)
-    e5.add_field(name="─── Permissao de Dono (apenas dono real) ───", value=(
-        f"`{p}addownerperm @cargo [...]` — conceder permissoes de dono a cargos\n"
-        f"`{p}removeownerperm @cargo [...]` — revogar permissoes de dono\n"
-        f"`{p}listownerperm` — listar cargos com permissao de dono"
-    ), inline=False)
-    pages.append(e5)
+    if category == "configuracao":
+        e = create_embed(guild, "yov! — Configuração")
+        e.add_field(name="Servidor (Dono)", value=(
+            f"`{p}setprefix <novo>` — alterar prefixo\n"
+            f"`{p}setcolor <hex>` — cor das embeds\n"
+            f"`{p}resetcolor` — resetar cor\n"
+            f"`{p}setperm @cargo` — cargo mínimo para usar bot\n"
+            f"`{p}antiraid` — módulos anti-raid\n"
+            f"`{p}owner` — painel de ações\n"
+            f"`{p}createlogs / deletelogs / clearlogs` — canais de log"
+        ), inline=False)
+        e.add_field(name="Cargos Staff", value=(
+            f"`{p}setstaffrole add @cargo` — adicionar cargo staff\n"
+            f"`{p}setstaffrole remove @cargo` — remover cargo staff\n"
+            f"`{p}setmuterole @cargo` — cargo de mute (voz)\n"
+            f"`{p}setcastigorole @cargo` — cargo de castigo\n"
+            f"`{p}setmutecallrole @cargo` — cargo de mute call\n"
+            f"`{p}setantibanrole @cargo` — cargo dado ao entrar\n"
+        ), inline=False)
+        e.add_field(name="Instagram & Sorteio", value=(
+            f"`{p}setinstagramcanal #canal` — canal de posts do Instagram\n"
+            f"`{p}setinstagramrole @cargo` — cargo para ver Instagram\n"
+            f"`{p}setsorteiorole @cargo` — cargo para criar sorteios\n"
+        ), inline=False)
+        e.add_field(name="Ban & VIP", value=(
+            f"`{p}addbanrole @cargo` — cargo com perm de ban\n"
+            f"`{p}removebanrole @cargo` — remover perm de ban\n"
+            f"`{p}addpermban @cargo <N>` — limite de bans/semana\n"
+            f"`{p}setpermvip @cargo` — cargo gestor de VIP\n"
+            f"`{p}cargovipabaixo @cargo` — referência de posição VIP\n"
+            f"`{p}addownerperm @cargo` — permissão de dono a cargo"
+        ), inline=False)
+        return e
 
-    return pages
+    e = create_embed(guild, "yov! — Help")
+    e.description = "Selecione uma categoria no menu abaixo."
+    return e
+
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, guild, p, requester_id):
+        self.guild = guild
+        self.p = p
+        self.requester_id = requester_id
+        options = [
+            discord.SelectOption(label="Início",      value="inicio",       emoji="🏠",
+                                 description="Sobre o bot e informações gerais"),
+            discord.SelectOption(label="Moderação",   value="moderacao",    emoji="🔨",
+                                 description="Ban, kick, mute, castigo, clear..."),
+            discord.SelectOption(label="Blacklist",   value="blacklist",    emoji="🚫",
+                                 description="Comandos de blacklist"),
+            discord.SelectOption(label="Anti-Ban",    value="antiban",      emoji="🛡️",
+                                 description="Anti-ban, anti-raid e proteções"),
+            discord.SelectOption(label="Sorteio",     value="sorteio",      emoji="🎉",
+                                 description="Criar e gerenciar sorteios"),
+            discord.SelectOption(label="Configuração",value="configuracao", emoji="⚙️",
+                                 description="Configurar o bot no servidor"),
+        ]
+        super().__init__(placeholder="Escolha uma categoria...", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            return await interaction.response.send_message("Apenas quem usou o help pode navegar.", ephemeral=True)
+        embed = _build_help_embed(self.guild, self.p, self.values[0])
+        await interaction.response.edit_message(embed=embed)
 
 
 class HelpView(discord.ui.View):
     def __init__(self, guild, p, requester_id):
         super().__init__(timeout=120)
-        self.guild = guild
-        self.p = p
-        self.requester_id = requester_id
-        self.page = 0
-        self.pages = _build_help_pages(guild, p)
         self.msg = None
-        self._update_buttons()
-
-    def _update_buttons(self):
-        for child in self.children:
-            if hasattr(child, "custom_id"):
-                if child.custom_id == "help_prev":
-                    child.disabled = self.page == 0
-                elif child.custom_id == "help_next":
-                    child.disabled = self.page == len(self.pages) - 1
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message("Apenas quem pediu o help pode navegar.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="anterior", style=discord.ButtonStyle.secondary, custom_id="help_prev", row=0)
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = max(0, self.page - 1)
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page], view=self)
-
-    @discord.ui.button(label="proximo", style=discord.ButtonStyle.secondary, custom_id="help_next", row=0)
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = min(len(self.pages) - 1, self.page + 1)
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page], view=self)
+        self.add_item(HelpSelect(guild, p, requester_id))
 
     async def on_timeout(self):
         if self.msg:
@@ -3731,14 +3798,13 @@ class HelpView(discord.ui.View):
 async def help_cmd(ctx):
     gd = get_guild_data(ctx.guild.id) if ctx.guild else {}
     p = gd.get("prefix", PREFIX)
-    pages = _build_help_pages(ctx.guild, p)
+    embed = _build_help_embed(ctx.guild, p, "inicio")
     view = HelpView(ctx.guild, p, ctx.author.id)
-    view._update_buttons()
     try:
         await ctx.message.delete()
     except Exception:
         pass
-    msg = await ctx.channel.send(embed=pages[0], view=view)
+    msg = await ctx.channel.send(embed=embed, view=view)
     view.msg = msg
 
 # ─── Owner Panel ──────────────────────────────────────────────────────────────
@@ -5578,6 +5644,754 @@ async def cmd_boasvindas(ctx, subcomando: str = None, *, valor: str = None):
         f"`{p}boasvindas descricao <texto>`",
         ctx.guild
     ))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── NOVOS RECURSOS: Unmute / Uncastigo / MuteCall / AntiBan / Sorteio / IG ──
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── helpers de permissão staff ────────────────────────────────────────────────
+
+def _has_staff_perm(ctx) -> bool:
+    """Retorna True se o autor tem cargo staff configurado, admin ou é dono."""
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    gd = get_guild_data(ctx.guild.id)
+    staff_roles = gd.get("staff_roles", [])
+    return any(str(r.id) in staff_roles for r in ctx.author.roles)
+
+def _has_giveaway_perm(ctx) -> bool:
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    gd = get_guild_data(ctx.guild.id)
+    gr = gd.get("giveaway_manager_roles", [])
+    return any(str(r.id) in gr for r in ctx.author.roles)
+
+def _has_instagram_perm(ctx) -> bool:
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    gd = get_guild_data(ctx.guild.id)
+    ir = gd.get("instagram_roles", [])
+    return any(str(r.id) in ir for r in ctx.author.roles)
+
+# ── helpers de DB para punições ───────────────────────────────────────────────
+
+def db_add_punishment(guild_id: int, user_id: int, ptype: str, role_id=None,
+                      expires_at=None, moderator_id=None, reason=None):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE punishments SET active = FALSE
+            WHERE guild_id=%s AND user_id=%s AND type=%s AND active=TRUE
+        """, (str(guild_id), str(user_id), ptype))
+        cur.execute("""
+            INSERT INTO punishments (guild_id, user_id, type, role_id, expires_at, moderator_id, reason)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (str(guild_id), str(user_id), ptype,
+              str(role_id) if role_id else None,
+              expires_at, str(moderator_id) if moderator_id else None, reason))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_add_punishment: {e}", flush=True)
+
+def db_remove_punishment(guild_id: int, user_id: int, ptype: str):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return None
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE punishments SET active=FALSE
+            WHERE guild_id=%s AND user_id=%s AND type=%s AND active=TRUE
+            RETURNING role_id
+        """, (str(guild_id), str(user_id), ptype))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row["role_id"] if row else None
+    except Exception as e:
+        print(f"[ERRO] db_remove_punishment: {e}", flush=True)
+        return None
+
+def db_get_expired_punishments():
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return []
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, guild_id, user_id, type, role_id
+            FROM punishments
+            WHERE active=TRUE AND expires_at IS NOT NULL AND expires_at <= NOW()
+        """)
+        rows = list(cur.fetchall())
+        conn.commit()
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[ERRO] db_get_expired_punishments: {e}", flush=True)
+        return []
+
+def db_deactivate_punishment(pid: int):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE punishments SET active=FALSE WHERE id=%s", (pid,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_deactivate_punishment: {e}", flush=True)
+
+# ── helpers de DB para sorteios ───────────────────────────────────────────────
+
+def db_create_giveaway(guild_id, channel_id, host_id, prize, winners_count, ends_at):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return None
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO giveaways (guild_id, channel_id, host_id, prize, winners_count, ends_at)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+        """, (str(guild_id), str(channel_id), str(host_id), prize, winners_count, ends_at))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row["id"] if row else None
+    except Exception as e:
+        print(f"[ERRO] db_create_giveaway: {e}", flush=True)
+        return None
+
+def db_update_giveaway_message(giveaway_id, message_id):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE giveaways SET message_id=%s WHERE id=%s", (str(message_id), giveaway_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_update_giveaway_message: {e}", flush=True)
+
+def db_get_active_giveaways():
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return []
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM giveaways WHERE ended=FALSE AND ends_at <= NOW()")
+        rows = list(cur.fetchall())
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[ERRO] db_get_active_giveaways: {e}", flush=True)
+        return []
+
+def db_end_giveaway(giveaway_id, winners):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE giveaways SET ended=TRUE, winners=%s WHERE id=%s
+        """, (winners, giveaway_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_end_giveaway: {e}", flush=True)
+
+def db_add_giveaway_entry(giveaway_id, user_id):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE giveaways SET entries = array_append(entries, %s)
+            WHERE id=%s AND NOT (%s = ANY(entries))
+        """, (str(user_id), giveaway_id, str(user_id)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_add_giveaway_entry: {e}", flush=True)
+
+# ── helpers de DB para posts Instagram ───────────────────────────────────────
+
+def db_add_post(guild_id, channel_id, author_id, image_url, caption=None, message_id=None):
+    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
+        return
+    try:
+        conn = _pg_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO posts (guild_id, channel_id, author_id, image_url, caption, message_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (str(guild_id), str(channel_id), str(author_id), image_url, caption,
+              str(message_id) if message_id else None))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERRO] db_add_post: {e}", flush=True)
+
+# ── Unmute ────────────────────────────────────────────────────────────────────
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, member: discord.Member = None):
+    if not member:
+        return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
+    try:
+        _pending_bot_actions.add((ctx.guild.id, member.id, "unmute"))
+        await member.timeout(None)
+    except discord.Forbidden:
+        _pending_bot_actions.discard((ctx.guild.id, member.id, "unmute"))
+        return await reply_and_delete(ctx, error_embed("Sem permissão para remover mute.", ctx.guild))
+    embed = create_embed(ctx.guild, "Mute Removido")
+    embed.description = (
+        f"**Usuário:** {member.mention} ({member.id})\n"
+        f"**Moderador:** {ctx.author.mention} ({ctx.author.id})\n"
+        f"**Horário:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+    )
+    await send_log(ctx.guild, "mute", embed)
+    await reply_and_delete(ctx, success_embed("Unmute", f"{member} teve o mute removido.", ctx.guild))
+
+# ── Uncastigo ─────────────────────────────────────────────────────────────────
+
+@bot.command(name="uncastigo")
+@commands.has_permissions(manage_roles=True)
+async def uncastigo(ctx, member: discord.Member = None):
+    if not member:
+        return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    role_id = gd.get("castigo_role_id")
+    castigo_role = None
+    if role_id:
+        castigo_role = ctx.guild.get_role(int(role_id))
+    if not castigo_role:
+        castigo_role = discord.utils.get(ctx.guild.roles, name="castigo")
+    if not castigo_role or castigo_role not in member.roles:
+        return await reply_and_delete(ctx, error_embed("Este membro não está em castigo.", ctx.guild))
+    try:
+        _pending_bot_actions.add((ctx.guild.id, member.id, "uncastigo"))
+        await member.remove_roles(castigo_role, reason=f"Castigo removido por {ctx.author}")
+    except discord.Forbidden:
+        _pending_bot_actions.discard((ctx.guild.id, member.id, "uncastigo"))
+        return await reply_and_delete(ctx, error_embed("Sem permissão para remover cargos.", ctx.guild))
+    db_remove_punishment(ctx.guild.id, member.id, "castigo")
+    embed = create_embed(ctx.guild, "Castigo Removido")
+    embed.description = (
+        f"**Usuário:** {member.mention} ({member.id})\n"
+        f"**Moderador:** {ctx.author.mention} ({ctx.author.id})\n"
+        f"**Horário:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+    )
+    await send_log(ctx.guild, "castigo", embed)
+    await reply_and_delete(ctx, success_embed("Uncastigo", f"{member} teve o castigo removido.", ctx.guild))
+
+# ── MuteCall ──────────────────────────────────────────────────────────────────
+
+@bot.command(name="mutecall")
+@commands.has_permissions(mute_members=True)
+async def mutecall(ctx, member: discord.Member = None, *, reason="Sem motivo informado"):
+    if not member:
+        return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
+    if is_protected(ctx.guild.id, member.id):
+        return await reply_and_delete(ctx, error_embed("Este membro está protegido.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    role_id = gd.get("mute_call_role_id")
+    mute_role = ctx.guild.get_role(int(role_id)) if role_id else None
+    if mute_role:
+        try:
+            _pending_bot_actions.add((ctx.guild.id, member.id, "mutecall"))
+            await member.add_roles(mute_role, reason=reason)
+        except discord.Forbidden:
+            _pending_bot_actions.discard((ctx.guild.id, member.id, "mutecall"))
+            return await reply_and_delete(ctx, error_embed("Sem permissão para adicionar cargos.", ctx.guild))
+    else:
+        # Mute direto no Discord
+        try:
+            _pending_bot_actions.add((ctx.guild.id, member.id, "mutecall"))
+            if member.voice:
+                await member.edit(mute=True, reason=reason)
+        except discord.Forbidden:
+            _pending_bot_actions.discard((ctx.guild.id, member.id, "mutecall"))
+            return await reply_and_delete(ctx, error_embed("Sem permissão para mutar no canal de voz.", ctx.guild))
+    db_add_punishment(ctx.guild.id, member.id, "mutecall",
+                      role_id=role_id, moderator_id=ctx.author.id, reason=reason)
+    embed = create_embed(ctx.guild, "Mute de Voz Aplicado")
+    embed.description = (
+        f"**Usuário:** {member.mention} ({member.id})\n"
+        f"**Moderador:** {ctx.author.mention} ({ctx.author.id})\n"
+        f"**Motivo:** {reason}\n"
+        f"**Horário:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+    )
+    await send_log(ctx.guild, "mute", embed)
+    await reply_and_delete(ctx, success_embed("MuteCall", f"{member} foi mutado no canal de voz.\nMotivo: {reason}", ctx.guild))
+
+@bot.command(name="unmutecall")
+@commands.has_permissions(mute_members=True)
+async def unmutecall(ctx, member: discord.Member = None):
+    if not member:
+        return await reply_and_delete(ctx, error_embed("Mencione um usuário válido.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    role_id = gd.get("mute_call_role_id")
+    mute_role = ctx.guild.get_role(int(role_id)) if role_id else None
+    removed = False
+    if mute_role and mute_role in member.roles:
+        try:
+            await member.remove_roles(mute_role, reason=f"MuteCall removido por {ctx.author}")
+            removed = True
+        except discord.Forbidden:
+            return await reply_and_delete(ctx, error_embed("Sem permissão para remover cargos.", ctx.guild))
+    if not removed and member.voice:
+        try:
+            await member.edit(mute=False, reason=f"UnmuteCall por {ctx.author}")
+            removed = True
+        except discord.Forbidden:
+            pass
+    db_remove_punishment(ctx.guild.id, member.id, "mutecall")
+    await reply_and_delete(ctx, success_embed("UnmuteCall", f"{member} teve o mute de voz removido.", ctx.guild))
+
+# ── AntibanRole ───────────────────────────────────────────────────────────────
+
+# (addantban / removeantban já existem acima — aqui adicionamos o setantibanrole)
+# Os comandos addantban/removeantban do original usam "anti_ban_users" no JSON,
+# o setantibanrole define qual cargo é dado automaticamente ao entrar.
+
+# ── Sorteio ───────────────────────────────────────────────────────────────────
+
+import random as _random
+
+class SorteioModal(discord.ui.Modal, title="Criar Sorteio"):
+    premio = discord.ui.TextInput(
+        label="Prêmio",
+        placeholder="Ex: Nitro, R$50, etc.",
+        max_length=100,
+    )
+    duracao = discord.ui.TextInput(
+        label="Duração",
+        placeholder="Ex: 10m, 1h, 1d, 7d",
+        max_length=10,
+    )
+    ganhadores = discord.ui.TextInput(
+        label="Número de ganhadores",
+        placeholder="Ex: 1",
+        max_length=3,
+        default="1",
+    )
+
+    def __init__(self, guild, channel, host):
+        super().__init__()
+        self.guild = guild
+        self.channel = channel
+        self.host = host
+
+    async def on_submit(self, interaction: discord.Interaction):
+        units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        raw = self.duracao.value.strip().lower()
+        unit = raw[-1] if raw else ""
+        if unit not in units or not raw[:-1].isdigit():
+            return await interaction.response.send_message(
+                "❌ Duração inválida. Use: `10m`, `1h`, `1d`, `7d`", ephemeral=True)
+        seconds = int(raw[:-1]) * units[unit]
+        try:
+            winners_count = max(1, int(self.ganhadores.value.strip()))
+        except ValueError:
+            winners_count = 1
+        ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        prize = self.premio.value.strip()
+
+        gaw_id = db_create_giveaway(self.guild.id, self.channel.id,
+                                    self.host.id, prize, winners_count, ends_at)
+
+        embed = discord.Embed(
+            title="🎉 SORTEIO 🎉",
+            description=(
+                f"**Prêmio:** {prize}\n"
+                f"**Ganhadores:** {winners_count}\n"
+                f"**Encerra:** <t:{int(ends_at.timestamp())}:R>\n"
+                f"**Organizador:** {self.host.mention}\n\n"
+                f"Reaja com 🎉 para participar!"
+            ),
+            color=EMBED_COLOR,
+        )
+        embed.set_footer(text=f"ID: {gaw_id}" if gaw_id else "Sorteio")
+        await interaction.response.defer()
+        msg = await self.channel.send(embed=embed)
+        await msg.add_reaction("🎉")
+        if gaw_id:
+            db_update_giveaway_message(gaw_id, msg.id)
+
+
+@bot.command(name="sorteio")
+async def sorteio(ctx):
+    if not _has_giveaway_perm(ctx):
+        return await reply_and_delete(ctx, error_embed(
+            "Você não tem permissão para criar sorteios.", ctx.guild))
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+    modal = SorteioModal(ctx.guild, ctx.channel, ctx.author)
+    # Como não podemos abrir modal via command prefix, enviamos painel intermediário
+    class _OpenModal(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+        @discord.ui.button(label="Criar Sorteio 🎉", style=discord.ButtonStyle.success)
+        async def open(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message("Apenas quem pediu pode usar.", ephemeral=True)
+            await interaction.response.send_modal(
+                SorteioModal(ctx.guild, ctx.channel, ctx.author))
+            self.stop()
+    view = _OpenModal()
+    msg = await ctx.channel.send(
+        embed=create_embed(ctx.guild, "Criar Sorteio", "Clique no botão para configurar o sorteio."),
+        view=view)
+    await view.wait()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+# ── Instagram ─────────────────────────────────────────────────────────────────
+
+class ComentarioModal(discord.ui.Modal, title="Adicionar Comentário"):
+    comentario = discord.ui.TextInput(
+        label="Comentário",
+        style=discord.TextStyle.paragraph,
+        placeholder="Escreva seu comentário...",
+        max_length=300,
+        required=False,
+    )
+
+    def __init__(self, post_msg):
+        super().__init__()
+        self.post_msg = post_msg
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.comentario.value.strip()
+        if not text:
+            return await interaction.response.send_message("Comentário vazio.", ephemeral=True)
+        embed = discord.Embed(
+            description=f"💬 **{interaction.user.display_name}:** {text}",
+            color=0x9b59b6,
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+
+class InstagramView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="❤️ Curtir", style=discord.ButtonStyle.danger, custom_id="ig_like")
+    async def curtir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"❤️ **{interaction.user.display_name}** curtiu esta foto!", ephemeral=False)
+
+    @discord.ui.button(label="💬 Comentar", style=discord.ButtonStyle.secondary, custom_id="ig_comment")
+    async def comentar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ComentarioModal(interaction.message))
+
+    @discord.ui.button(label="📤 Compartilhar", style=discord.ButtonStyle.primary, custom_id="ig_share")
+    async def compartilhar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"📤 **{interaction.user.display_name}** compartilhou esta foto!", ephemeral=False)
+
+
+@bot.command(name="instagram")
+async def instagram_post(ctx, *, caption: str = ""):
+    if not _has_instagram_perm(ctx):
+        return await reply_and_delete(ctx, error_embed(
+            "Você não tem permissão para postar no Instagram.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    ch_id = gd.get("instagram_channel_id")
+    channel = ctx.guild.get_channel(int(ch_id)) if ch_id else ctx.channel
+
+    if not ctx.message.attachments:
+        return await reply_and_delete(ctx, error_embed(
+            "Anexe uma imagem ao comando.", ctx.guild))
+
+    image_url = ctx.message.attachments[0].url
+    embed = discord.Embed(
+        description=caption if caption else None,
+        color=0xC13584,
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.set_image(url=image_url)
+    embed.set_footer(text="yov! Instagram")
+    embed.timestamp = datetime.now(timezone.utc)
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    view = InstagramView()
+    msg = await channel.send(embed=embed, view=view)
+    db_add_post(ctx.guild.id, channel.id, ctx.author.id, image_url, caption, msg.id)
+
+# ── Comandos de Configuração dos Novos Campos ─────────────────────────────────
+
+@bot.command(name="setstaffrole")
+async def setstaffrole(ctx, acao: str = None, cargo: discord.Role = None):
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
+    if not acao or acao not in ("add", "remove", "lista"):
+        p = await get_prefix(bot, ctx.message)
+        return await reply_and_delete(ctx, error_embed(
+            f"Use: `{p}setstaffrole add @cargo` / `remove @cargo` / `lista`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    if acao == "lista":
+        roles = gd.get("staff_roles", [])
+        if not roles:
+            return await reply_and_delete(ctx, create_embed(ctx.guild, "Staff Roles", "Nenhum cargo staff configurado."))
+        names = [f"<@&{r}>" for r in roles]
+        return await reply_and_delete(ctx, create_embed(ctx.guild, "Staff Roles", "\n".join(names)))
+    if not cargo:
+        return await reply_and_delete(ctx, error_embed("Mencione um cargo.", ctx.guild))
+    sr = gd.setdefault("staff_roles", [])
+    if acao == "add":
+        if str(cargo.id) not in sr:
+            sr.append(str(cargo.id))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Staff Role", f"{cargo.mention} adicionado como staff.", ctx.guild))
+    elif acao == "remove":
+        try:
+            sr.remove(str(cargo.id))
+        except ValueError:
+            return await reply_and_delete(ctx, error_embed("Cargo não está na lista.", ctx.guild))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Staff Role", f"{cargo.mention} removido.", ctx.guild))
+
+def _make_role_setter(field: str, label: str):
+    """Fabrica um comando setXXXrole para campos simples de role_id."""
+    async def _cmd(ctx, cargo: discord.Role = None):
+        if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+            return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
+        gd = get_guild_data(ctx.guild.id)
+        if cargo is None:
+            gd[field] = None
+            update_guild_data(ctx.guild.id, gd)
+            return await reply_and_delete(ctx, success_embed(label, f"{label} removido.", ctx.guild))
+        gd[field] = str(cargo.id)
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed(label, f"{cargo.mention} definido como {label}.", ctx.guild))
+    return _cmd
+
+bot.command(name="setmuterole")(_make_role_setter("mute_role_id", "Cargo Mute"))
+bot.command(name="setcastigorole")(_make_role_setter("castigo_role_id", "Cargo Castigo"))
+bot.command(name="setmutecallrole")(_make_role_setter("mute_call_role_id", "Cargo MuteCall"))
+bot.command(name="setantibanrole")(_make_role_setter("antiban_role_id", "Cargo AntiBan"))
+
+@bot.command(name="setinstagramcanal")
+async def setinstagramcanal(ctx, channel: discord.TextChannel = None):
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    if channel is None:
+        gd["instagram_channel_id"] = None
+        update_guild_data(ctx.guild.id, gd)
+        return await reply_and_delete(ctx, success_embed("Instagram", "Canal de Instagram removido.", ctx.guild))
+    gd["instagram_channel_id"] = str(channel.id)
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Instagram", f"Canal de posts definido: {channel.mention}", ctx.guild))
+
+@bot.command(name="setinstagramrole")
+async def setinstagramrole(ctx, acao: str = None, cargo: discord.Role = None):
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
+    if not acao or acao not in ("add", "remove", "lista"):
+        p = await get_prefix(bot, ctx.message)
+        return await reply_and_delete(ctx, error_embed(
+            f"Use: `{p}setinstagramrole add @cargo` / `remove @cargo` / `lista`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    if acao == "lista":
+        roles = gd.get("instagram_roles", [])
+        names = [f"<@&{r}>" for r in roles] if roles else ["Nenhum"]
+        return await reply_and_delete(ctx, create_embed(ctx.guild, "Instagram Roles", "\n".join(names)))
+    if not cargo:
+        return await reply_and_delete(ctx, error_embed("Mencione um cargo.", ctx.guild))
+    ir = gd.setdefault("instagram_roles", [])
+    if acao == "add":
+        if str(cargo.id) not in ir:
+            ir.append(str(cargo.id))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Instagram Role", f"{cargo.mention} pode postar no Instagram.", ctx.guild))
+    elif acao == "remove":
+        try:
+            ir.remove(str(cargo.id))
+        except ValueError:
+            return await reply_and_delete(ctx, error_embed("Cargo não está na lista.", ctx.guild))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Instagram Role", f"{cargo.mention} removido.", ctx.guild))
+
+@bot.command(name="setsorteiorole")
+async def setsorteiorole(ctx, acao: str = None, cargo: discord.Role = None):
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
+    if not acao or acao not in ("add", "remove", "lista"):
+        p = await get_prefix(bot, ctx.message)
+        return await reply_and_delete(ctx, error_embed(
+            f"Use: `{p}setsorteiorole add @cargo` / `remove @cargo` / `lista`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    if acao == "lista":
+        roles = gd.get("giveaway_manager_roles", [])
+        names = [f"<@&{r}>" for r in roles] if roles else ["Nenhum"]
+        return await reply_and_delete(ctx, create_embed(ctx.guild, "Sorteio Roles", "\n".join(names)))
+    if not cargo:
+        return await reply_and_delete(ctx, error_embed("Mencione um cargo.", ctx.guild))
+    gr = gd.setdefault("giveaway_manager_roles", [])
+    if acao == "add":
+        if str(cargo.id) not in gr:
+            gr.append(str(cargo.id))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Sorteio Role", f"{cargo.mention} pode criar sorteios.", ctx.guild))
+    elif acao == "remove":
+        try:
+            gr.remove(str(cargo.id))
+        except ValueError:
+            return await reply_and_delete(ctx, error_embed("Cargo não está na lista.", ctx.guild))
+        update_guild_data(ctx.guild.id, gd)
+        await reply_and_delete(ctx, success_embed("Sorteio Role", f"{cargo.mention} removido.", ctx.guild))
+
+# ── On Member Join — conceder antiban_role se configurado ────────────────────
+# (o on_member_join original já existe; vamos adicionar hook via setup_hook)
+
+_original_on_member_join = None
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+
+from discord.ext import tasks as _tasks
+
+@_tasks.loop(seconds=30)
+async def check_punishments_task():
+    """Remove punições expiradas (castigo/mutecall por role)."""
+    expired = db_get_expired_punishments()
+    for row in expired:
+        try:
+            guild = bot.get_guild(int(row["guild_id"]))
+            if not guild:
+                db_deactivate_punishment(row["id"])
+                continue
+            member = guild.get_member(int(row["user_id"]))
+            if not member:
+                db_deactivate_punishment(row["id"])
+                continue
+            role_id = row["role_id"]
+            if role_id:
+                role = guild.get_role(int(role_id))
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role, reason="Punição expirada")
+                    except Exception:
+                        pass
+            db_deactivate_punishment(row["id"])
+        except Exception as e:
+            print(f"[TASK] check_punishments_task: {e}", flush=True)
+
+@_tasks.loop(seconds=30)
+async def check_giveaways_task():
+    """Encerra sorteios que passaram do prazo."""
+    ended = db_get_active_giveaways()
+    for row in ended:
+        try:
+            guild = bot.get_guild(int(row["guild_id"]))
+            if not guild:
+                db_end_giveaway(row["id"], [])
+                continue
+            channel = guild.get_channel(int(row["channel_id"]))
+            entries = list(row.get("entries") or [])
+            winners_count = row.get("winners_count", 1)
+            prize = row.get("prize", "Prêmio")
+            winners = []
+            if entries:
+                sample = min(winners_count, len(entries))
+                winners = _random.sample(entries, sample)
+
+            db_end_giveaway(row["id"], winners)
+
+            if channel:
+                if winners:
+                    mentions = " ".join(f"<@{w}>" for w in winners)
+                    embed = discord.Embed(
+                        title="🎉 Sorteio Encerrado!",
+                        description=(
+                            f"**Prêmio:** {prize}\n"
+                            f"**Vencedor(es):** {mentions}\n\n"
+                            f"Parabéns!"
+                        ),
+                        color=EMBED_COLOR,
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="🎉 Sorteio Encerrado",
+                        description=f"**Prêmio:** {prize}\n\nNinguém participou.",
+                        color=EMBED_COLOR,
+                    )
+                await channel.send(embed=embed)
+
+                # Tenta atualizar mensagem original
+                if row.get("message_id"):
+                    try:
+                        msg = await channel.fetch_message(int(row["message_id"]))
+                        e2 = msg.embeds[0] if msg.embeds else discord.Embed()
+                        e2.title = "🎉 SORTEIO ENCERRADO 🎉"
+                        e2.color = 0x555555
+                        await msg.edit(embed=e2)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[TASK] check_giveaways_task: {e}", flush=True)
+
+@bot.event
+async def on_member_join_antiban_hook(member: discord.Member):
+    """Dá o cargo antiban_role_id ao membro ao entrar, se configurado."""
+    gd = get_guild_data(member.guild.id)
+    role_id = gd.get("antiban_role_id")
+    if role_id:
+        role = member.guild.get_role(int(role_id))
+        if role:
+            try:
+                await member.add_roles(role, reason="Cargo automático anti-ban")
+            except Exception:
+                pass
+
+# Registra o hook extra após o bot estar pronto
+@bot.listen("on_member_join")
+async def _member_join_antiban(member: discord.Member):
+    await on_member_join_antiban_hook(member)
+
+# Inicia as tasks quando o bot ficar pronto
+@bot.listen("on_ready")
+async def _start_tasks():
+    if not check_punishments_task.is_running():
+        check_punishments_task.start()
+    if not check_giveaways_task.is_running():
+        check_giveaways_task.start()
 
 # ─── Error Handler ────────────────────────────────────────────────────────────
 
