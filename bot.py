@@ -1721,6 +1721,8 @@ async def on_message(message):
         if not message.guild:
             await bot.process_commands(message)
             return
+        if await _ig_handle_message(message, get_guild_data(message.guild.id)):
+            return
         await handle_anti_spam(message)
         await handle_anti_gore(message)
         if isinstance(message.author, discord.Member) and is_blacklisted(message.guild.id, message.author.id):
@@ -3826,12 +3828,20 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
 
     if category == "instagram":
         e = create_embed(guild, "yov! — Instagram")
-        e.add_field(name="Uso", value=(
-            f"`{p}instagram [legenda]` — postar uma foto no canal de Instagram\n"
-            "Anexe uma imagem ao comando para publicar."
+        e.add_field(name="Como funciona", value=(
+            "Quem tem o cargo autorizado envia uma foto diretamente no canal configurado.\n"
+            "O bot converte automaticamente a imagem em um post com botoes de interacao.\n"
+            "Mensagens sem imagem ou de quem nao tem cargo sao apagadas automaticamente."
+        ), inline=False)
+        e.add_field(name="Botoes do post", value=(
+            "**Curtir** — adiciona ou remove sua curtida (contador no rodape)\n"
+            "**Comentar** — abre campo para digitar um comentario publico\n"
+            "**...** — lista quem curtiu e os ultimos comentarios (apenas voce ve)\n"
+            "**Excluir** — apaga o post (somente quem postou ou admins)"
         ), inline=False)
         e.add_field(name="Configuracao (Admin/Dono)", value=(
-            f"`{p}setinstagramcanal #canal` — definir canal onde os posts serao enviados\n"
+            f"`{p}setinstagramcanal #canal` — definir canal de posts\n"
+            f"`{p}setinstagramcanal` — remover canal configurado\n"
             f"`{p}setinstagramrole add @cargo` — adicionar cargo com permissao de postar\n"
             f"`{p}setinstagramrole remove @cargo` — remover cargo\n"
             f"`{p}setinstagramrole lista` — listar cargos com permissao"
@@ -6207,82 +6217,234 @@ async def sorteio(ctx):
         pass
 
 # ── Instagram ─────────────────────────────────────────────────────────────────
+# Armazena dados dos posts em memoria: msg_id -> dict
+_ig_posts: dict = {}
 
-class ComentarioModal(discord.ui.Modal, title="Adicionar Comentário"):
-    comentario = discord.ui.TextInput(
-        label="Comentário",
+
+def _ig_build_embed(post: dict) -> discord.Embed:
+    count = len(post["likes"])
+    embed = discord.Embed(color=post["color"])
+    embed.set_author(name=post["author_name"], icon_url=post["author_avatar"])
+    if post.get("caption"):
+        embed.description = post["caption"]
+    embed.set_image(url=post["image_url"])
+    heart = "♥" if count > 0 else "♡"
+    embed.set_footer(text=f"{heart} {count}  |  brocasito")
+    embed.timestamp = datetime.now(timezone.utc)
+    return embed
+
+
+class IgComentarioModal(discord.ui.Modal, title="Comentar"):
+    texto = discord.ui.TextInput(
+        label="Comentario",
         style=discord.TextStyle.paragraph,
-        placeholder="Escreva seu comentário...",
+        placeholder="Escreva seu comentario...",
         max_length=300,
-        required=False,
     )
 
-    def __init__(self, post_msg):
+    def __init__(self, msg_id: int):
         super().__init__()
-        self.post_msg = post_msg
+        self.msg_id = msg_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        text = self.comentario.value.strip()
+        text = self.texto.value.strip()
         if not text:
-            return await interaction.response.send_message("Comentário vazio.", ephemeral=True)
-        embed = discord.Embed(
-            description=f"💬 **{interaction.user.display_name}:** {text}",
-            color=0x9b59b6,
+            return await interaction.response.send_message("Comentario vazio.", ephemeral=True)
+        post = _ig_posts.get(self.msg_id)
+        if post is None:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        post["comments"].append((interaction.user.id, interaction.user.display_name, text))
+        await interaction.response.send_message(
+            f"**{interaction.user.display_name}:** {text}", ephemeral=False
         )
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
 
 
-class InstagramView(discord.ui.View):
-    def __init__(self):
+class IgView(discord.ui.View):
+    def __init__(self, msg_id: int, author_id: int):
         super().__init__(timeout=None)
+        self.msg_id = msg_id
+        self.author_id = author_id
 
-    @discord.ui.button(label="❤️ Curtir", style=discord.ButtonStyle.danger, custom_id="ig_like")
-    async def curtir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            f"❤️ **{interaction.user.display_name}** curtiu esta foto!", ephemeral=False)
+        btn_like = discord.ui.Button(
+            label="♡  0",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"ig_like:{msg_id}",
+            row=0,
+        )
+        btn_comment = discord.ui.Button(
+            label="Comentar",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"ig_comment:{msg_id}",
+            row=0,
+        )
+        btn_info = discord.ui.Button(
+            label="•••",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"ig_info:{msg_id}",
+            row=0,
+        )
+        btn_delete = discord.ui.Button(
+            label="Excluir",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"ig_delete:{msg_id}",
+            row=0,
+        )
 
-    @discord.ui.button(label="💬 Comentar", style=discord.ButtonStyle.secondary, custom_id="ig_comment")
-    async def comentar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ComentarioModal(interaction.message))
+        btn_like.callback = self._like_cb
+        btn_comment.callback = self._comment_cb
+        btn_info.callback = self._info_cb
+        btn_delete.callback = self._delete_cb
 
-    @discord.ui.button(label="📤 Compartilhar", style=discord.ButtonStyle.primary, custom_id="ig_share")
-    async def compartilhar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            f"📤 **{interaction.user.display_name}** compartilhou esta foto!", ephemeral=False)
+        self.add_item(btn_like)
+        self.add_item(btn_comment)
+        self.add_item(btn_info)
+        self.add_item(btn_delete)
+
+    def _like_button(self):
+        for child in self.children:
+            if hasattr(child, "custom_id") and child.custom_id == f"ig_like:{self.msg_id}":
+                return child
+        return None
+
+    async def _like_cb(self, interaction: discord.Interaction):
+        post = _ig_posts.get(self.msg_id)
+        if post is None:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        uid = interaction.user.id
+        if uid in post["likes"]:
+            post["likes"].discard(uid)
+        else:
+            post["likes"].add(uid)
+        count = len(post["likes"])
+        btn = self._like_button()
+        if btn:
+            btn.label = f"♥  {count}" if count > 0 else "♡  0"
+        new_embed = _ig_build_embed(post)
+        await interaction.response.edit_message(embed=new_embed, view=self)
+
+    async def _comment_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(IgComentarioModal(self.msg_id))
+
+    async def _info_cb(self, interaction: discord.Interaction):
+        post = _ig_posts.get(self.msg_id)
+        if post is None:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        lines = []
+        count_likes = len(post["likes"])
+        if count_likes:
+            names = []
+            for uid in list(post["likes"])[:20]:
+                member = interaction.guild.get_member(uid)
+                names.append(member.display_name if member else f"<@{uid}>")
+            lines.append(f"**Curtidas ({count_likes}):** " + ", ".join(names))
+        else:
+            lines.append("**Curtidas:** nenhuma ainda")
+        count_comments = len(post["comments"])
+        if count_comments:
+            clines = [f"**Comentarios ({count_comments}):**"]
+            for _, name, text in post["comments"][-15:]:
+                clines.append(f"{name}: {text}")
+            lines.append("\n".join(clines))
+        else:
+            lines.append("**Comentarios:** nenhum ainda")
+        await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
+
+    async def _delete_cb(self, interaction: discord.Interaction):
+        post = _ig_posts.get(self.msg_id)
+        if post is None:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        is_admin = (interaction.user.guild_permissions.administrator
+                    or interaction.user.id == interaction.guild.owner_id)
+        if interaction.user.id != post["author_id"] and not is_admin:
+            return await interaction.response.send_message(
+                "Apenas quem postou pode excluir.", ephemeral=True)
+        _ig_posts.pop(self.msg_id, None)
+        await interaction.message.delete()
+        await interaction.response.send_message("Post excluido.", ephemeral=True)
 
 
-@bot.command(name="instagram")
-async def instagram_post(ctx, *, caption: str = ""):
-    if not _has_instagram_perm(ctx):
-        return await reply_and_delete(ctx, error_embed(
-            "Você não tem permissão para postar no Instagram.", ctx.guild))
-    gd = get_guild_data(ctx.guild.id)
+async def _ig_handle_message(message: discord.Message, gd: dict) -> bool:
+    """
+    Processa mensagens no canal de Instagram.
+    Retorna True se a mensagem foi tratada (deve parar o processamento normal).
+    """
     ch_id = gd.get("instagram_channel_id")
-    channel = ctx.guild.get_channel(int(ch_id)) if ch_id else ctx.channel
+    if not ch_id or str(message.channel.id) != str(ch_id):
+        return False
 
-    if not ctx.message.attachments:
-        return await reply_and_delete(ctx, error_embed(
-            "Anexe uma imagem ao comando.", ctx.guild))
+    # Verifica permissao
+    ig_roles = gd.get("instagram_roles", [])
+    is_admin = (message.author.guild_permissions.administrator
+                or message.author.id == message.guild.owner_id)
+    has_role = any(str(r.id) in ig_roles for r in message.author.roles)
 
-    image_url = ctx.message.attachments[0].url
-    embed = discord.Embed(
-        description=caption if caption else None,
-        color=0xC13584,
-    )
-    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
-    embed.set_image(url=image_url)
-    embed.set_footer(text="yov! Instagram")
-    embed.timestamp = datetime.now(timezone.utc)
+    if not is_admin and not has_role:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            warn = await message.channel.send(
+                f"{message.author.mention} Voce nao tem permissao para enviar mensagens aqui.",
+                delete_after=5,
+            )
+        except Exception:
+            pass
+        return True
+
+    # Verifica se tem imagem
+    image_attachment = None
+    for att in message.attachments:
+        if att.content_type and att.content_type.startswith("image/"):
+            image_attachment = att
+            break
+
+    if image_attachment is None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await message.channel.send(
+                f"{message.author.mention} Apenas imagens sao permitidas neste canal.",
+                delete_after=5,
+            )
+        except Exception:
+            pass
+        return True
+
+    caption = message.content.strip() if message.content.strip() else None
+    color = get_embed_color(message.guild)
+    post_data = {
+        "author_id": message.author.id,
+        "author_name": message.author.display_name,
+        "author_avatar": str(message.author.display_avatar.url),
+        "image_url": image_attachment.url,
+        "caption": caption,
+        "likes": set(),
+        "comments": [],
+        "guild_id": message.guild.id,
+        "color": color,
+    }
 
     try:
-        await ctx.message.delete()
+        await message.delete()
     except Exception:
         pass
 
-    view = InstagramView()
-    msg = await channel.send(embed=embed, view=view)
-    db_add_post(ctx.guild.id, channel.id, ctx.author.id, image_url, caption, msg.id)
+    embed = _ig_build_embed(post_data)
+    view_placeholder = IgView(0, message.author.id)
+    sent = await message.channel.send(embed=embed, view=view_placeholder)
+
+    post_data_final = dict(post_data)
+    _ig_posts[sent.id] = post_data_final
+
+    real_view = IgView(sent.id, message.author.id)
+    await sent.edit(view=real_view)
+
+    db_add_post(message.guild.id, message.channel.id, message.author.id,
+                image_attachment.url, caption, sent.id)
+    return True
 
 # ── Comandos de Configuração dos Novos Campos ─────────────────────────────────
 
