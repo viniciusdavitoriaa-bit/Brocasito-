@@ -3636,7 +3636,7 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
     if category == "inicio":
         e = create_embed(guild, "yov! — Inicio")
         e.description = (
-            "Bem-vindo ao **yov!**, bot de moderacao e gestao do Discord.\n\n"
+            "Bem-vindo ao **brocasito**, bot de moderacao e gestao do Discord.\n\n"
             "Use o menu abaixo para navegar entre as categorias de comandos.\n\n"
             f"Prefixo atual: `{p}`\n"
             f"Suporte: <https://discord.gg/RyYZAJkw6k>"
