@@ -124,20 +124,6 @@ def init_db_postgres():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_punishments_guild_user ON punishments(guild_id, user_id, active)")
 
-        # Tabela de posts do Instagram
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                id          SERIAL      PRIMARY KEY,
-                guild_id    TEXT        NOT NULL,
-                channel_id  TEXT        NOT NULL,
-                message_id  TEXT,
-                author_id   TEXT        NOT NULL,
-                image_url   TEXT        NOT NULL,
-                caption     TEXT,
-                created_at  TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-
         # Tabela de sorteios
         cur.execute("""
             CREATE TABLE IF NOT EXISTS giveaways (
@@ -234,8 +220,6 @@ def _make_default_guild_data():
         "castigo_role_id": None,
         "mute_call_role_id": None,
         "antiban_role_id": None,
-        "instagram_channel_id": None,
-        "instagram_roles": [],
         "giveaway_manager_roles": [],
     }
 
@@ -310,8 +294,6 @@ def _apply_guild_defaults(gd: dict):
         ("castigo_role_id", None),
         ("mute_call_role_id", None),
         ("antiban_role_id", None),
-        ("instagram_channel_id", None),
-        ("instagram_roles", []),
         ("giveaway_manager_roles", []),
     ]:
         if nk not in gd:
@@ -1720,8 +1702,6 @@ async def on_message(message):
         # Permitir comandos na DM (ex: painel)
         if not message.guild:
             await bot.process_commands(message)
-            return
-        if await _ig_handle_message(message, get_guild_data(message.guild.id)):
             return
         await handle_anti_spam(message)
         await handle_anti_gore(message)
@@ -3826,28 +3806,6 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         ), inline=False)
         return e
 
-    if category == "instagram":
-        e = create_embed(guild, "yov! — Instagram")
-        e.add_field(name="Como funciona", value=(
-            "Quem tem o cargo autorizado envia uma foto diretamente no canal configurado.\n"
-            "O bot converte automaticamente a imagem em um post com botoes de interacao.\n"
-            "Mensagens sem imagem ou de quem nao tem cargo sao apagadas automaticamente."
-        ), inline=False)
-        e.add_field(name="Botoes do post", value=(
-            "**Curtir** — adiciona ou remove sua curtida (contador no rodape)\n"
-            "**Comentar** — abre campo para digitar um comentario publico\n"
-            "**...** — lista quem curtiu e os ultimos comentarios (apenas voce ve)\n"
-            "**Excluir** — apaga o post (somente quem postou ou admins)"
-        ), inline=False)
-        e.add_field(name="Configuracao (Admin/Dono)", value=(
-            f"`{p}setinstagramcanal #canal` — definir canal de posts\n"
-            f"`{p}setinstagramcanal` — remover canal configurado\n"
-            f"`{p}setinstagramrole add @cargo` — adicionar cargo com permissao de postar\n"
-            f"`{p}setinstagramrole remove @cargo` — remover cargo\n"
-            f"`{p}setinstagramrole lista` — listar cargos com permissao"
-        ), inline=False)
-        return e
-
     if category == "configuracao":
         e = create_embed(guild, "yov! — Configuracao")
         e.add_field(name="Servidor", value=(
@@ -3907,7 +3865,6 @@ class HelpSelect(discord.ui.Select):
             discord.SelectOption(label="Tickets",          value="tickets",       description="Sistema de tickets e painel de suporte"),
             discord.SelectOption(label="Boas-vindas",      value="boasvindas",    description="Mensagem automatica para novos membros"),
             discord.SelectOption(label="Sorteio",          value="sorteio",       description="Criar e gerenciar sorteios"),
-            discord.SelectOption(label="Instagram",        value="instagram",     description="Postar e configurar o canal de Instagram"),
             discord.SelectOption(label="Configuracao",     value="configuracao",  description="Prefixo, cor, logs, cargos do sistema"),
             discord.SelectOption(label="Geral",            value="geral",         description="Ping, status e outros comandos gerais"),
         ]
@@ -5810,15 +5767,6 @@ def _has_giveaway_perm(ctx) -> bool:
     gr = gd.get("giveaway_manager_roles", [])
     return any(str(r.id) in gr for r in ctx.author.roles)
 
-def _has_instagram_perm(ctx) -> bool:
-    if ctx.author.id == ctx.guild.owner_id:
-        return True
-    if ctx.author.guild_permissions.administrator:
-        return True
-    gd = get_guild_data(ctx.guild.id)
-    ir = gd.get("instagram_roles", [])
-    return any(str(r.id) in ir for r in ctx.author.roles)
-
 # ── helpers de DB para punições ───────────────────────────────────────────────
 
 def db_add_punishment(guild_id: int, user_id: int, ptype: str, role_id=None,
@@ -5976,25 +5924,6 @@ def db_add_giveaway_entry(giveaway_id, user_id):
         conn.close()
     except Exception as e:
         print(f"[ERRO] db_add_giveaway_entry: {e}", flush=True)
-
-# ── helpers de DB para posts Instagram ───────────────────────────────────────
-
-def db_add_post(guild_id, channel_id, author_id, image_url, caption=None, message_id=None):
-    if not DATABASE_URL or not _PSYCOPG2_AVAILABLE:
-        return
-    try:
-        conn = _pg_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO posts (guild_id, channel_id, author_id, image_url, caption, message_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (str(guild_id), str(channel_id), str(author_id), image_url, caption,
-              str(message_id) if message_id else None))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"[ERRO] db_add_post: {e}", flush=True)
 
 # ── Unmute ────────────────────────────────────────────────────────────────────
 
@@ -6216,238 +6145,9 @@ async def sorteio(ctx):
     except Exception:
         pass
 
-# ── Instagram ─────────────────────────────────────────────────────────────────
-# Armazena dados dos posts em memoria: msg_id -> dict
-_ig_posts: dict = {}
 
 
-def _ig_build_embed(post: dict) -> discord.Embed:
-    count = len(post["likes"])
-    embed = discord.Embed(color=post["color"])
-    embed.set_author(name=post["author_name"], icon_url=post["author_avatar"])
-    if post.get("caption"):
-        embed.description = post["caption"]
-    embed.set_image(url=post["image_url"])
-    heart = "♥" if count > 0 else "♡"
-    embed.set_footer(text=f"{heart} {count}  |  brocasito")
-    embed.timestamp = datetime.now(timezone.utc)
-    return embed
 
-
-class IgComentarioModal(discord.ui.Modal, title="Comentar"):
-    texto = discord.ui.TextInput(
-        label="Comentario",
-        style=discord.TextStyle.paragraph,
-        placeholder="Escreva seu comentario...",
-        max_length=300,
-    )
-
-    def __init__(self, msg_id: int):
-        super().__init__()
-        self.msg_id = msg_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        text = self.texto.value.strip()
-        if not text:
-            return await interaction.response.send_message("Comentario vazio.", ephemeral=True)
-        post = _ig_posts.get(self.msg_id)
-        if post is None:
-            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
-        post["comments"].append((interaction.user.id, interaction.user.display_name, text))
-        await interaction.response.send_message(
-            f"**{interaction.user.display_name}:** {text}", ephemeral=False
-        )
-
-
-class IgView(discord.ui.View):
-    def __init__(self, msg_id: int, author_id: int):
-        super().__init__(timeout=None)
-        self.msg_id = msg_id
-        self.author_id = author_id
-
-        btn_like = discord.ui.Button(
-            label="♡  0",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"ig_like:{msg_id}",
-            row=0,
-        )
-        btn_comment = discord.ui.Button(
-            label="Comentar",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"ig_comment:{msg_id}",
-            row=0,
-        )
-        btn_info = discord.ui.Button(
-            label="•••",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"ig_info:{msg_id}",
-            row=0,
-        )
-        btn_delete = discord.ui.Button(
-            label="Excluir",
-            style=discord.ButtonStyle.danger,
-            custom_id=f"ig_delete:{msg_id}",
-            row=0,
-        )
-
-        btn_like.callback = self._like_cb
-        btn_comment.callback = self._comment_cb
-        btn_info.callback = self._info_cb
-        btn_delete.callback = self._delete_cb
-
-        self.add_item(btn_like)
-        self.add_item(btn_comment)
-        self.add_item(btn_info)
-        self.add_item(btn_delete)
-
-    def _like_button(self):
-        for child in self.children:
-            if hasattr(child, "custom_id") and child.custom_id == f"ig_like:{self.msg_id}":
-                return child
-        return None
-
-    async def _like_cb(self, interaction: discord.Interaction):
-        post = _ig_posts.get(self.msg_id)
-        if post is None:
-            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
-        uid = interaction.user.id
-        if uid in post["likes"]:
-            post["likes"].discard(uid)
-        else:
-            post["likes"].add(uid)
-        count = len(post["likes"])
-        btn = self._like_button()
-        if btn:
-            btn.label = f"♥  {count}" if count > 0 else "♡  0"
-        new_embed = _ig_build_embed(post)
-        await interaction.response.edit_message(embed=new_embed, view=self)
-
-    async def _comment_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(IgComentarioModal(self.msg_id))
-
-    async def _info_cb(self, interaction: discord.Interaction):
-        post = _ig_posts.get(self.msg_id)
-        if post is None:
-            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
-        lines = []
-        count_likes = len(post["likes"])
-        if count_likes:
-            names = []
-            for uid in list(post["likes"])[:20]:
-                member = interaction.guild.get_member(uid)
-                names.append(member.display_name if member else f"<@{uid}>")
-            lines.append(f"**Curtidas ({count_likes}):** " + ", ".join(names))
-        else:
-            lines.append("**Curtidas:** nenhuma ainda")
-        count_comments = len(post["comments"])
-        if count_comments:
-            clines = [f"**Comentarios ({count_comments}):**"]
-            for _, name, text in post["comments"][-15:]:
-                clines.append(f"{name}: {text}")
-            lines.append("\n".join(clines))
-        else:
-            lines.append("**Comentarios:** nenhum ainda")
-        await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
-
-    async def _delete_cb(self, interaction: discord.Interaction):
-        post = _ig_posts.get(self.msg_id)
-        if post is None:
-            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
-        is_admin = (interaction.user.guild_permissions.administrator
-                    or interaction.user.id == interaction.guild.owner_id)
-        if interaction.user.id != post["author_id"] and not is_admin:
-            return await interaction.response.send_message(
-                "Apenas quem postou pode excluir.", ephemeral=True)
-        _ig_posts.pop(self.msg_id, None)
-        await interaction.message.delete()
-        await interaction.response.send_message("Post excluido.", ephemeral=True)
-
-
-async def _ig_handle_message(message: discord.Message, gd: dict) -> bool:
-    """
-    Processa mensagens no canal de Instagram.
-    Retorna True se a mensagem foi tratada (deve parar o processamento normal).
-    """
-    ch_id = gd.get("instagram_channel_id")
-    if not ch_id or str(message.channel.id) != str(ch_id):
-        return False
-
-    # Verifica permissao
-    ig_roles = gd.get("instagram_roles", [])
-    is_admin = (message.author.guild_permissions.administrator
-                or message.author.id == message.guild.owner_id)
-    has_role = any(str(r.id) in ig_roles for r in message.author.roles)
-
-    if not is_admin and not has_role:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        try:
-            warn = await message.channel.send(
-                f"{message.author.mention} Voce nao tem permissao para enviar mensagens aqui.",
-                delete_after=5,
-            )
-        except Exception:
-            pass
-        return True
-
-    # Verifica se tem imagem (checa content_type e extensao do arquivo)
-    _IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".heic")
-    image_attachment = None
-    for att in message.attachments:
-        ct = att.content_type or ""
-        by_ct = ct.startswith("image/")
-        by_ext = att.filename.lower().endswith(_IMG_EXTS)
-        if by_ct or by_ext:
-            image_attachment = att
-            break
-
-    if image_attachment is None:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        try:
-            await message.channel.send(
-                f"{message.author.mention} Apenas imagens sao permitidas neste canal.",
-                delete_after=5,
-            )
-        except Exception:
-            pass
-        return True
-
-    caption = message.content.strip() if message.content.strip() else None
-    color = get_embed_color(message.guild)
-    post_data: dict = {
-        "author_id": message.author.id,
-        "author_name": message.author.display_name,
-        "author_avatar": str(message.author.display_avatar.url),
-        "image_url": image_attachment.url,
-        "caption": caption,
-        "likes": set(),
-        "comments": [],
-        "guild_id": message.guild.id,
-        "color": color,
-    }
-
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    # Envia sem view primeiro para obter o message ID real
-    embed = _ig_build_embed(post_data)
-    sent = await message.channel.send(embed=embed)
-
-    # Agora temos o ID real — registra o post e edita com a view correta
-    _ig_posts[sent.id] = post_data
-    real_view = IgView(sent.id, message.author.id)
-    await sent.edit(view=real_view)
-
-    db_add_post(message.guild.id, message.channel.id, message.author.id,
-                image_attachment.url, caption, sent.id)
-    return True
 
 # ── Comandos de Configuração dos Novos Campos ─────────────────────────────────
 
@@ -6501,48 +6201,6 @@ bot.command(name="setmuterole")(_make_role_setter("mute_role_id", "Cargo Mute"))
 bot.command(name="setcastigorole")(_make_role_setter("castigo_role_id", "Cargo Castigo"))
 bot.command(name="setmutecallrole")(_make_role_setter("mute_call_role_id", "Cargo MuteCall"))
 bot.command(name="setantibanrole")(_make_role_setter("antiban_role_id", "Cargo AntiBan"))
-
-@bot.command(name="setinstagramcanal")
-async def setinstagramcanal(ctx, channel: discord.TextChannel = None):
-    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
-        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
-    gd = get_guild_data(ctx.guild.id)
-    if channel is None:
-        gd["instagram_channel_id"] = None
-        update_guild_data(ctx.guild.id, gd)
-        return await reply_and_delete(ctx, success_embed("Instagram", "Canal de Instagram removido.", ctx.guild))
-    gd["instagram_channel_id"] = str(channel.id)
-    update_guild_data(ctx.guild.id, gd)
-    await reply_and_delete(ctx, success_embed("Instagram", f"Canal de posts definido: {channel.mention}", ctx.guild))
-
-@bot.command(name="setinstagramrole")
-async def setinstagramrole(ctx, acao: str = None, cargo: discord.Role = None):
-    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
-        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono.", ctx.guild))
-    if not acao or acao not in ("add", "remove", "lista"):
-        p = await get_prefix(bot, ctx.message)
-        return await reply_and_delete(ctx, error_embed(
-            f"Use: `{p}setinstagramrole add @cargo` / `remove @cargo` / `lista`", ctx.guild))
-    gd = get_guild_data(ctx.guild.id)
-    if acao == "lista":
-        roles = gd.get("instagram_roles", [])
-        names = [f"<@&{r}>" for r in roles] if roles else ["Nenhum"]
-        return await reply_and_delete(ctx, create_embed(ctx.guild, "Instagram Roles", "\n".join(names)))
-    if not cargo:
-        return await reply_and_delete(ctx, error_embed("Mencione um cargo.", ctx.guild))
-    ir = gd.setdefault("instagram_roles", [])
-    if acao == "add":
-        if str(cargo.id) not in ir:
-            ir.append(str(cargo.id))
-        update_guild_data(ctx.guild.id, gd)
-        await reply_and_delete(ctx, success_embed("Instagram Role", f"{cargo.mention} pode postar no Instagram.", ctx.guild))
-    elif acao == "remove":
-        try:
-            ir.remove(str(cargo.id))
-        except ValueError:
-            return await reply_and_delete(ctx, error_embed("Cargo não está na lista.", ctx.guild))
-        update_guild_data(ctx.guild.id, gd)
-        await reply_and_delete(ctx, success_embed("Instagram Role", f"{cargo.mention} removido.", ctx.guild))
 
 @bot.command(name="setsorteiorole")
 async def setsorteiorole(ctx, acao: str = None, cargo: discord.Role = None):
