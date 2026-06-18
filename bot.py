@@ -237,6 +237,7 @@ def _make_default_guild_data():
         "instagram_channel_id": None,
         "instagram_roles": [],
         "giveaway_manager_roles": [],
+        "help_category_emojis": {},
     }
 
 def _apply_guild_defaults(gd: dict):
@@ -313,6 +314,7 @@ def _apply_guild_defaults(gd: dict):
         ("instagram_channel_id", None),
         ("instagram_roles", []),
         ("giveaway_manager_roles", []),
+        ("help_category_emojis", {}),
     ]:
         if nk not in gd:
             gd[nk] = nv
@@ -3713,6 +3715,24 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         ), inline=False)
         return e
 
+    if category == "emoji":
+        e = create_embed(guild, "yov! — Emoji do Servidor")
+        e.add_field(name="Comandos", value=(
+            f"`{p}addemoji <nome> [url]` — adiciona emoji ao servidor\n"
+            f"  ↳ Anexe uma imagem **ou** informe uma URL\n"
+            f"`{p}removeemoji <emoji>` — remove um emoji do servidor\n"
+            f"`{p}listemoji` — lista todos os emojis do servidor"
+        ), inline=False)
+        e.add_field(name="Exemplos", value=(
+            f"`{p}addemoji pepe` — envia com imagem anexada\n"
+            f"`{p}addemoji pepe https://i.imgur.com/abc.png`\n"
+            f"`{p}removeemoji :pepe:`"
+        ), inline=False)
+        e.add_field(name="Permissão necessária", value=(
+            "Gerenciar Expressões (Manage Emojis)"
+        ), inline=False)
+        return e
+
     if category == "configuracao":
         e = create_embed(guild, "yov! — Configuração")
         e.add_field(name="Servidor (Dono)", value=(
@@ -3752,25 +3772,31 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
     return e
 
 
+_HELP_CATEGORIES = [
+    ("inicio",       "Início",       "Sobre o bot e informações gerais"),
+    ("moderacao",    "Moderação",    "Ban, kick, mute, castigo, clear..."),
+    ("blacklist",    "Blacklist",    "Comandos de blacklist"),
+    ("antiban",      "Anti-Ban",     "Anti-ban, anti-raid e proteções"),
+    ("sorteio",      "Sorteio",      "Criar e gerenciar sorteios"),
+    ("emoji",        "Emojis",       "Adicionar e remover emojis do servidor"),
+    ("configuracao", "Configuração", "Configurar o bot no servidor"),
+]
+
 class HelpSelect(discord.ui.Select):
     def __init__(self, guild, p, requester_id):
         self.guild = guild
         self.p = p
         self.requester_id = requester_id
-        options = [
-            discord.SelectOption(label="Início",      value="inicio",       emoji="🏠",
-                                 description="Sobre o bot e informações gerais"),
-            discord.SelectOption(label="Moderação",   value="moderacao",    emoji="🔨",
-                                 description="Ban, kick, mute, castigo, clear..."),
-            discord.SelectOption(label="Blacklist",   value="blacklist",    emoji="🚫",
-                                 description="Comandos de blacklist"),
-            discord.SelectOption(label="Anti-Ban",    value="antiban",      emoji="🛡️",
-                                 description="Anti-ban, anti-raid e proteções"),
-            discord.SelectOption(label="Sorteio",     value="sorteio",      emoji="🎉",
-                                 description="Criar e gerenciar sorteios"),
-            discord.SelectOption(label="Configuração",value="configuracao", emoji="⚙️",
-                                 description="Configurar o bot no servidor"),
-        ]
+        # Carrega emojis personalizados salvos para este servidor
+        emojis_cfg = {}
+        if guild:
+            gd = get_guild_data(guild.id)
+            emojis_cfg = gd.get("help_category_emojis", {})
+        options = []
+        for value, nome, desc in _HELP_CATEGORIES:
+            emoji_prefix = emojis_cfg.get(value, "")
+            label = f"{emoji_prefix} {nome}".strip() if emoji_prefix else nome
+            options.append(discord.SelectOption(label=label, value=value, description=desc))
         super().__init__(placeholder="Escolha uma categoria...", options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
@@ -6384,6 +6410,154 @@ async def on_member_join_antiban_hook(member: discord.Member):
 @bot.listen("on_member_join")
 async def _member_join_antiban(member: discord.Member):
     await on_member_join_antiban_hook(member)
+
+# ── Emoji do Servidor ─────────────────────────────────────────────────────────
+
+@bot.command(name="setcatemoji")
+async def setcatemoji(ctx, categoria: str = None, *, emoji_str: str = None):
+    """Define o emoji que aparece na frente do nome de uma categoria no help."""
+    if ctx.author.id != ctx.guild.owner_id and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas admin ou dono do servidor.", ctx.guild))
+
+    categorias_validas = [v for v, _, _ in _HELP_CATEGORIES]
+    nomes_display = "\n".join(f"`{v}` — {n}" for v, n, _ in _HELP_CATEGORIES)
+
+    if not categoria or categoria.lower() not in categorias_validas:
+        p = await get_prefix(bot, ctx.message)
+        embed = error_embed(
+            f"Categoria inválida.\n\n"
+            f"**Categorias disponíveis:**\n{nomes_display}\n\n"
+            f"**Uso:** `{p}setcatemoji <categoria> <emoji>`\n"
+            f"**Limpar:** `{p}setcatemoji <categoria> limpar`",
+            ctx.guild)
+        return await reply_and_delete(ctx, embed)
+
+    categoria = categoria.lower()
+    gd = get_guild_data(ctx.guild.id)
+    emojis_cfg = gd.setdefault("help_category_emojis", {})
+
+    # Limpar emoji da categoria
+    if not emoji_str or emoji_str.strip().lower() == "limpar":
+        emojis_cfg.pop(categoria, None)
+        update_guild_data(ctx.guild.id, gd)
+        nome_cat = next(n for v, n, _ in _HELP_CATEGORIES if v == categoria)
+        return await reply_and_delete(ctx, success_embed(
+            "Emoji Removido", f"Emoji da categoria **{nome_cat}** removido.", ctx.guild))
+
+    # Salva o emoji (pode ser unicode ou emoji personalizado como <:pepe:123>)
+    emoji_str = emoji_str.strip()
+    emojis_cfg[categoria] = emoji_str
+    update_guild_data(ctx.guild.id, gd)
+    nome_cat = next(n for v, n, _ in _HELP_CATEGORIES if v == categoria)
+    await reply_and_delete(ctx, success_embed(
+        "Emoji Definido",
+        f"Categoria **{nome_cat}** agora aparece como: **{emoji_str} {nome_cat}**\n"
+        f"Use `yov!help` para ver o resultado.",
+        ctx.guild))
+
+
+@bot.command(name="listcatemoji")
+async def listcatemoji(ctx):
+    """Lista todos os emojis configurados para as categorias do help."""
+    gd = get_guild_data(ctx.guild.id)
+    emojis_cfg = gd.get("help_category_emojis", {})
+    linhas = []
+    for value, nome, _ in _HELP_CATEGORIES:
+        emoji_prefix = emojis_cfg.get(value, "")
+        display = f"{emoji_prefix} {nome}".strip() if emoji_prefix else f"*(sem emoji)* {nome}"
+        linhas.append(f"`{value}` — {display}")
+    embed = create_embed(ctx.guild, "Emojis das Categorias do Help")
+    embed.description = "\n".join(linhas)
+    p = await get_prefix(bot, ctx.message)
+    embed.set_footer(text=f"Use {p}setcatemoji <categoria> <emoji> para configurar")
+    await reply_and_delete(ctx, embed)
+
+
+@bot.command(name="addemoji")
+@commands.has_permissions(manage_emojis=True)
+async def addemoji(ctx, nome: str = None, url: str = None):
+    if not nome:
+        return await reply_and_delete(ctx, error_embed(
+            "Informe o nome do emoji. Ex: `yov!addemoji pepe` (com imagem anexada) "
+            "ou `yov!addemoji pepe https://...`", ctx.guild))
+    # Valida nome: apenas letras, números e _
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9_]{2,32}$", nome):
+        return await reply_and_delete(ctx, error_embed(
+            "Nome inválido. Use apenas letras, números e _ (2–32 caracteres).", ctx.guild))
+    # Obtém a imagem: anexo ou URL
+    image_bytes = None
+    if ctx.message.attachments:
+        att = ctx.message.attachments[0]
+        if not att.content_type or not att.content_type.startswith("image/"):
+            return await reply_and_delete(ctx, error_embed("O anexo deve ser uma imagem.", ctx.guild))
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(att.url) as resp:
+                    image_bytes = await resp.read()
+        except Exception:
+            return await reply_and_delete(ctx, error_embed("Não foi possível baixar o anexo.", ctx.guild))
+    elif url:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return await reply_and_delete(ctx, error_embed("URL inválida ou inacessível.", ctx.guild))
+                    image_bytes = await resp.read()
+        except Exception:
+            return await reply_and_delete(ctx, error_embed("Não foi possível baixar a imagem da URL.", ctx.guild))
+    else:
+        return await reply_and_delete(ctx, error_embed(
+            "Anexe uma imagem ou informe uma URL.", ctx.guild))
+    try:
+        emoji = await ctx.guild.create_custom_emoji(name=nome, image=image_bytes,
+                                                     reason=f"Criado por {ctx.author}")
+    except discord.Forbidden:
+        return await reply_and_delete(ctx, error_embed("Sem permissão para criar emojis.", ctx.guild))
+    except discord.HTTPException as e:
+        return await reply_and_delete(ctx, error_embed(f"Erro ao criar emoji: {e}", ctx.guild))
+    await reply_and_delete(ctx, success_embed(
+        "Emoji Adicionado",
+        f"Emoji **:{emoji.name}:** criado com sucesso! {emoji}", ctx.guild))
+
+
+@bot.command(name="removeemoji")
+@commands.has_permissions(manage_emojis=True)
+async def removeemoji(ctx, emoji: discord.Emoji = None):
+    if not emoji:
+        return await reply_and_delete(ctx, error_embed(
+            "Mencione um emoji do servidor. Ex: `yov!removeemoji :pepe:`", ctx.guild))
+    if emoji.guild_id != ctx.guild.id:
+        return await reply_and_delete(ctx, error_embed(
+            "Este emoji não pertence a este servidor.", ctx.guild))
+    nome = emoji.name
+    try:
+        await emoji.delete(reason=f"Removido por {ctx.author}")
+    except discord.Forbidden:
+        return await reply_and_delete(ctx, error_embed("Sem permissão para remover emojis.", ctx.guild))
+    except discord.HTTPException as e:
+        return await reply_and_delete(ctx, error_embed(f"Erro ao remover emoji: {e}", ctx.guild))
+    await reply_and_delete(ctx, success_embed(
+        "Emoji Removido", f"Emoji **:{nome}:** removido com sucesso.", ctx.guild))
+
+
+@bot.command(name="listemoji")
+async def listemoji(ctx):
+    emojis = ctx.guild.emojis
+    if not emojis:
+        return await reply_and_delete(ctx, error_embed("Este servidor não tem emojis personalizados.", ctx.guild))
+    # Divide em páginas de 20 emojis
+    chunk_size = 20
+    chunks = [emojis[i:i+chunk_size] for i in range(0, len(emojis), chunk_size)]
+    embed = create_embed(ctx.guild, f"Emojis do Servidor ({len(emojis)} total)")
+    for i, chunk in enumerate(chunks[:4]):  # máx 4 fields
+        nomes = "  ".join(str(e) + f" `:{e.name}:`" for e in chunk)
+        embed.add_field(name=f"─── {i*chunk_size+1}–{i*chunk_size+len(chunk)} ───",
+                        value=nomes, inline=False)
+    if len(chunks) > 4:
+        embed.set_footer(text=f"Mostrando 80 de {len(emojis)} emojis.")
+    await reply_and_delete(ctx, embed)
+
 
 # Inicia as tasks quando o bot ficar pronto
 @bot.listen("on_ready")
