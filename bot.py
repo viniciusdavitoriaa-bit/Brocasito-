@@ -3634,9 +3634,9 @@ async def status(ctx):
 def _build_help_embed(guild, p, category: str) -> discord.Embed:
     """Retorna a embed de help para a categoria escolhida."""
     if category == "inicio":
-        e = create_embed(guild, "yov! — Início")
+        e = create_embed(guild, "yov! — Inicio")
         e.description = (
-            "Bem-vindo ao **yov!**, bot de moderação e gestão do Discord.\n\n"
+            "Bem-vindo ao **yov!**, bot de moderacao e gestao do Discord.\n\n"
             "Use o menu abaixo para navegar entre as categorias de comandos.\n\n"
             f"Prefixo atual: `{p}`\n"
             f"Suporte: <https://discord.gg/RyYZAJkw6k>"
@@ -3644,26 +3644,25 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         return e
 
     if category == "moderacao":
-        e = create_embed(guild, "yov! — Moderação")
-        e.add_field(name="Punições", value=(
+        e = create_embed(guild, "yov! — Moderacao")
+        e.add_field(name="Punicoes", value=(
             f"`{p}ban @user [motivo]` — banir membro\n"
             f"`{p}kick @user [motivo]` — expulsar membro\n"
             f"`{p}mute @user <duracao> [motivo]` — timeout (ex: 10m, 1h)\n"
             f"`{p}unmute @user` — remover timeout\n"
-            f"`{p}castigo @user [motivo]` — cargo castigo\n"
+            f"`{p}castigo @user [motivo]` — dar cargo de castigo\n"
             f"`{p}uncastigo @user` — remover castigo\n"
             f"`{p}mutecall @user [motivo]` — mute de voz\n"
+            f"`{p}unmutecall @user` — remover mute de voz"
         ), inline=False)
         e.add_field(name="Canais", value=(
             f"`{p}clear <1-100>` — apagar mensagens\n"
             f"`{p}lock` — trancar canal\n"
             f"`{p}unlock` — destrancar canal\n"
-            f"`{p}nuke` — recriar canal zerado\n"
-            f"`{p}cl` — apagar suas mensagens no canal\n"
-            f"`{p}helpcl` — ver gatilhos cl ativos"
+            f"`{p}nuke` — recriar canal zerado"
         ), inline=False)
-        e.add_field(name="Proteção", value=(
-            f"`{p}protected @user` — ativar/desativar proteção\n"
+        e.add_field(name="Protecao", value=(
+            f"`{p}protected @user` — ativar/desativar protecao do membro\n"
             f"`{p}protectedlist` — listar membros protegidos"
         ), inline=False)
         return e
@@ -3673,28 +3672,138 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         e.add_field(name="Comandos", value=(
             f"`{p}blacklist @user [motivo]` — adicionar blacklist permanente\n"
             f"`{p}removeblacklist @user` — remover da blacklist\n"
-            f"`{p}removetempblacklist @user` — remover blacklist temporária"
+            f"`{p}removetempblacklist @user` — remover blacklist temporaria"
         ), inline=False)
         e.add_field(name="Sobre", value=(
-            "Membros na blacklist são banidos automaticamente ao entrar no servidor.\n"
-            "Blacklist permanente: não expira.\n"
-            "Blacklist temporária: configurada pelo sistema anti-ban."
+            "Membros na blacklist perdem todos os cargos automaticamente ao entrar no servidor.\n"
+            "Blacklist permanente: nao expira.\n"
+            "Blacklist temporaria: configurada pelo sistema anti-ban."
         ), inline=False)
         return e
 
-    if category == "antiban":
-        e = create_embed(guild, "yov! — Anti-Ban")
-        e.add_field(name="Comandos", value=(
-            f"`{p}addantban @user` — adicionar proteção anti-ban\n"
-            f"`{p}removeantban @user` — remover proteção\n"
-            f"`{p}antiraid` — painel de módulos anti-raid\n"
-            f"`{p}setantibanrole @cargo` — cargo automático ao entrar (anti-ban)\n"
+    if category == "seguranca":
+        e = create_embed(guild, "yov! — Seguranca")
+        e.add_field(name="Anti-Ban", value=(
+            f"`{p}addantban @user` — distribuir protecao anti-ban (apenas VIPs, max 5)\n"
+            f"`{p}removeantban @user` — remover protecao anti-ban\n"
+            f"`{p}setantibanrole @cargo` — cargo dado automaticamente ao entrar"
         ), inline=False)
         e.add_field(name="Anti-Raid", value=(
-            "• **Anti-Spam** — remove mensagens repetidas\n"
-            "• **Anti-Gore** — bloqueia imagens proibidas\n"
-            "• **Anti-Raid** — ativa modo lento sob flood de entradas\n"
-            "• **Anti-Disconnect** — pune quem desconecta em massa"
+            f"`{p}antiraid` — painel para ativar/desativar modulos de protecao\n\n"
+            f"**Anti-Spam** — remove mensagens em rafada ({SPAM_LIMIT} em {SPAM_WINDOW}s)\n"
+            f"**Anti-Gore** — bloqueia imagens e videos de membros inferiores\n"
+            f"**Anti-Raid** — detecta acoes em massa e bane o responsavel\n"
+            f"**Anti-Disconnect** — remove cargos de quem desconecta membros de call a forca"
+        ), inline=False)
+        return e
+
+    if category == "vip":
+        e = create_embed(guild, "yov! — VIP")
+        e.add_field(name="Uso (apenas VIPs)", value=(
+            f"`{p}addvip @user` — dar seu cargo VIP a um membro\n"
+            f"`{p}removevip @user` — remover seu cargo VIP de um membro\n"
+            f"`{p}addantban @user` — distribuir Anti-Ban para um membro (max 5)\n"
+            f"`{p}removeantban @user` — remover Anti-Ban de um membro\n"
+            f"`{p}gerenciarvip` — painel para editar nome, cor e emoji do seu cargo VIP\n"
+            f"`{p}vipinfo [@user]` — ver informacoes do VIP\n"
+            f"`{p}helpvip` — ver resumo dos comandos VIP"
+        ), inline=False)
+        e.add_field(name="Gestao (Dono/Gestor)", value=(
+            f"`{p}addpermvip @user` — conceder status VIP a um membro\n"
+            f"`{p}removepermvip @user` — remover status VIP de um membro\n"
+            f"`{p}setpermvip @cargo` — definir cargo gestor de VIPs\n"
+            f"`{p}addpermcargo @cargo` — adicionar cargo como gestor de VIPs\n"
+            f"`{p}removepermcargo @cargo` — remover cargo gestor de VIPs\n"
+            f"`{p}cargovipabaixo @cargo` — referencia de posicao para cargos VIP criados"
+        ), inline=False)
+        return e
+
+    if category == "painelcargos":
+        e = create_embed(guild, "yov! — Painel de Cargos")
+        e.add_field(name="Uso", value=(
+            f"`{p}setarcargo @membro` — abrir painel para dar/remover cargos a um membro"
+        ), inline=False)
+        e.add_field(name="Configuracao (Dono/Admin)", value=(
+            f"`{p}addcargopanel @cargo` — adicionar cargo ao painel de setagem\n"
+            f"`{p}removecargopanel @cargo` — remover cargo do painel de setagem\n"
+            f"`{p}listcargopanel` — listar cargos do painel e quem pode usa-lo\n"
+            f"`{p}addpermpanel @cargo` — dar permissao para usar o painel de setagem\n"
+            f"`{p}removepermpanel @cargo` — remover permissao do painel de setagem"
+        ), inline=False)
+        return e
+
+    if category == "permissoes":
+        e = create_embed(guild, "yov! — Permissoes")
+        e.add_field(name="Permissao Minima", value=(
+            f"`{p}setperm @cargo` — definir cargo minimo para usar o bot\n"
+            f"`{p}setperm` — remover restricao de cargo minimo"
+        ), inline=False)
+        e.add_field(name="Cargos de Ban", value=(
+            f"`{p}addbanrole @cargo` — dar permissao de ban a um cargo\n"
+            f"`{p}removebanrole @cargo` — remover permissao de ban\n"
+            f"`{p}banroles` — listar cargos com permissao de ban"
+        ), inline=False)
+        e.add_field(name="Limite de Bans por Cargo", value=(
+            f"`{p}addpermban @cargo <N>` — definir limite de bans por semana\n"
+            f"`{p}editpermban @cargo <N>` — editar limite de bans de um cargo\n"
+            f"`{p}banlimits` — ver painel de contadores de ban\n"
+            f"`{p}resetban` — resetar todos os contadores de ban"
+        ), inline=False)
+        e.add_field(name="Permissao de Dono", value=(
+            f"`{p}addownerperm @cargo` — conceder permissao de dono a um cargo\n"
+            f"`{p}removeownerperm @cargo` — remover permissao de dono de um cargo\n"
+            f"`{p}listownerperm` — listar cargos com permissao de dono"
+        ), inline=False)
+        return e
+
+    if category == "cl":
+        e = create_embed(guild, "yov! — CL")
+        e.add_field(name="Uso", value=(
+            f"`{p}cl` — apagar todas as suas mensagens no canal atual\n"
+            f"`{p}helpcl` — ver todos os gatilhos CL ativos no servidor"
+        ), inline=False)
+        e.add_field(name="Configuracao (Admin/Dono)", value=(
+            f"`{p}clcargo add @cargo` — adicionar cargo com permissao de usar cl\n"
+            f"`{p}clcargo remove @cargo` — remover cargo\n"
+            f"`{p}clcargo lista` — listar cargos com permissao cl\n"
+            f"`{p}clpalavra add <palavra>` — adicionar palavra gatilho para cl\n"
+            f"`{p}clpalavra remove <palavra>` — remover palavra gatilho\n"
+            f"`{p}clpalavra limpar` — remover todos os gatilhos\n"
+            f"`{p}clpalavra lista` — listar todos os gatilhos ativos"
+        ), inline=False)
+        return e
+
+    if category == "tickets":
+        e = create_embed(guild, "yov! — Tickets")
+        e.add_field(name="Painel", value=(
+            f"`{p}criarticket` — enviar o painel de abertura de tickets no canal atual"
+        ), inline=False)
+        e.add_field(name="Configuracao (Admin/Dono)", value=(
+            f"`{p}addassumerole @cargo` — dar permissao de assumir tickets a um cargo\n"
+            f"`{p}removeassumerole @cargo` — remover permissao de assumir tickets\n"
+            f"`{p}assumeroles` — listar cargos com permissao de assumir tickets"
+        ), inline=False)
+        e.add_field(name="Sobre", value=(
+            "O sistema de tickets cria canais privados automaticamente.\n"
+            "Cargos de suporte definidos nas configuracoes tem acesso automatico a todos os tickets."
+        ), inline=False)
+        return e
+
+    if category == "boasvindas":
+        e = create_embed(guild, "yov! — Boas-vindas")
+        e.add_field(name="Comandos", value=(
+            f"`{p}boasvindas` — ver configuracao atual\n"
+            f"`{p}boasvindas ativar` — ativar mensagem de boas-vindas\n"
+            f"`{p}boasvindas desativar` — desativar mensagem\n"
+            f"`{p}boasvindas canal #canal` — definir canal de boas-vindas\n"
+            f"`{p}boasvindas titulo <texto>` — editar titulo da mensagem\n"
+            f"`{p}boasvindas descricao <texto>` — editar descricao\n"
+            f"`{p}boasvindas cor <hex>` — definir cor da embed"
+        ), inline=False)
+        e.add_field(name="Variaveis disponiveis", value=(
+            "`{user}` — mencao do membro\n"
+            "`{server}` — nome do servidor\n"
+            "`{count}` — numero de membros atual"
         ), inline=False)
         return e
 
@@ -3702,48 +3811,67 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         e = create_embed(guild, "yov! — Sorteio")
         e.add_field(name="Comandos", value=(
             f"`{p}sorteio` — criar um novo sorteio (painel interativo)\n"
-            f"`{p}setsorteiorole @cargo` — cargo que pode criar sorteios"
+            f"`{p}setsorteiorole add @cargo` — adicionar cargo que pode criar sorteios\n"
+            f"`{p}setsorteiorole remove @cargo` — remover cargo\n"
+            f"`{p}setsorteiorole lista` — listar cargos com permissao de sorteio"
         ), inline=False)
         e.add_field(name="Como funciona", value=(
-            "1. Digite `yov!sorteio` para abrir o painel\n"
-            "2. Preencha o prêmio, duração e nº de ganhadores\n"
+            f"1. Use `{p}sorteio` para abrir o painel de criacao\n"
+            "2. Preencha o premio, duracao e numero de ganhadores\n"
             "3. O bot cria o sorteio no canal atual\n"
-            "4. Membros reagem com 🎉 para participar\n"
+            "4. Membros reagem para participar\n"
             "5. Ao encerrar, o bot sorteia e anuncia os vencedores"
         ), inline=False)
         return e
 
-    if category == "configuracao":
-        e = create_embed(guild, "yov! — Configuração")
-        e.add_field(name="Servidor (Dono)", value=(
-            f"`{p}setprefix <novo>` — alterar prefixo\n"
-            f"`{p}setcolor <hex>` — cor das embeds\n"
-            f"`{p}resetcolor` — resetar cor\n"
-            f"`{p}setperm @cargo` — cargo mínimo para usar bot\n"
-            f"`{p}antiraid` — módulos anti-raid\n"
-            f"`{p}owner` — painel de ações\n"
-            f"`{p}createlogs / deletelogs / clearlogs` — canais de log"
+    if category == "instagram":
+        e = create_embed(guild, "yov! — Instagram")
+        e.add_field(name="Uso", value=(
+            f"`{p}instagram [legenda]` — postar uma foto no canal de Instagram\n"
+            "Anexe uma imagem ao comando para publicar."
         ), inline=False)
-        e.add_field(name="Cargos Staff", value=(
+        e.add_field(name="Configuracao (Admin/Dono)", value=(
+            f"`{p}setinstagramcanal #canal` — definir canal onde os posts serao enviados\n"
+            f"`{p}setinstagramrole add @cargo` — adicionar cargo com permissao de postar\n"
+            f"`{p}setinstagramrole remove @cargo` — remover cargo\n"
+            f"`{p}setinstagramrole lista` — listar cargos com permissao"
+        ), inline=False)
+        return e
+
+    if category == "configuracao":
+        e = create_embed(guild, "yov! — Configuracao")
+        e.add_field(name="Servidor", value=(
+            f"`{p}setprefix <novo>` — alterar prefixo do bot\n"
+            f"`{p}setcolor <hex>` — definir cor das embeds (ex: 7c3aed)\n"
+            f"`{p}resetcolor` — resetar cor para o padrao\n"
+            f"`{p}antiraid` — painel de modulos anti-raid\n"
+            f"`{p}owner` — painel de acoes rapidas do dono"
+        ), inline=False)
+        e.add_field(name="Logs", value=(
+            f"`{p}createlogs` — criar todos os canais de log automaticamente\n"
+            f"`{p}deletelogs` — excluir todos os canais de log\n"
+            f"`{p}clearlogs` — limpar mensagens de todos os canais de log"
+        ), inline=False)
+        e.add_field(name="Cargos do Sistema", value=(
             f"`{p}setstaffrole add @cargo` — adicionar cargo staff\n"
             f"`{p}setstaffrole remove @cargo` — remover cargo staff\n"
-            f"`{p}setmuterole @cargo` — cargo de mute (voz)\n"
+            f"`{p}setstaffrole lista` — listar cargos staff\n"
+            f"`{p}setmuterole @cargo` — cargo usado no mute\n"
             f"`{p}setcastigorole @cargo` — cargo de castigo\n"
-            f"`{p}setmutecallrole @cargo` — cargo de mute call\n"
-            f"`{p}setantibanrole @cargo` — cargo dado ao entrar\n"
+            f"`{p}setmutecallrole @cargo` — cargo de mute de voz\n"
+            f"`{p}setantibanrole @cargo` — cargo dado ao entrar (anti-ban)"
         ), inline=False)
-        e.add_field(name="Instagram & Sorteio", value=(
-            f"`{p}setinstagramcanal #canal` — canal de posts do Instagram\n"
-            f"`{p}setinstagramrole @cargo` — cargo para ver Instagram\n"
-            f"`{p}setsorteiorole @cargo` — cargo para criar sorteios\n"
+        e.add_field(name="Mensagem em Massa", value=(
+            f"`{p}enviarmsg` — abrir painel para enviar embed por DM a todos os membros"
         ), inline=False)
-        e.add_field(name="Ban & VIP", value=(
-            f"`{p}addbanrole @cargo` — cargo com perm de ban\n"
-            f"`{p}removebanrole @cargo` — remover perm de ban\n"
-            f"`{p}addpermban @cargo <N>` — limite de bans/semana\n"
-            f"`{p}setpermvip @cargo` — cargo gestor de VIP\n"
-            f"`{p}cargovipabaixo @cargo` — referência de posição VIP\n"
-            f"`{p}addownerperm @cargo` — permissão de dono a cargo"
+        return e
+
+    if category == "geral":
+        e = create_embed(guild, "yov! — Geral")
+        e.add_field(name="Comandos", value=(
+            f"`{p}ping` — ver latencia do bot\n"
+            f"`{p}status` — ver estatisticas do servidor\n"
+            f"`{p}help` — abrir este menu de ajuda"
         ), inline=False)
         return e
 
@@ -3758,18 +3886,20 @@ class HelpSelect(discord.ui.Select):
         self.p = p
         self.requester_id = requester_id
         options = [
-            discord.SelectOption(label="Início",      value="inicio",       emoji="🏠",
-                                 description="Sobre o bot e informações gerais"),
-            discord.SelectOption(label="Moderação",   value="moderacao",    emoji="🔨",
-                                 description="Ban, kick, mute, castigo, clear..."),
-            discord.SelectOption(label="Blacklist",   value="blacklist",    emoji="🚫",
-                                 description="Comandos de blacklist"),
-            discord.SelectOption(label="Anti-Ban",    value="antiban",      emoji="🛡️",
-                                 description="Anti-ban, anti-raid e proteções"),
-            discord.SelectOption(label="Sorteio",     value="sorteio",      emoji="🎉",
-                                 description="Criar e gerenciar sorteios"),
-            discord.SelectOption(label="Configuração",value="configuracao", emoji="⚙️",
-                                 description="Configurar o bot no servidor"),
+            discord.SelectOption(label="Inicio",           value="inicio",        description="Sobre o bot e informacoes gerais"),
+            discord.SelectOption(label="Moderacao",        value="moderacao",     description="Ban, kick, mute, castigo, clear, lock, nuke..."),
+            discord.SelectOption(label="Blacklist",        value="blacklist",     description="Adicionar e remover membros da blacklist"),
+            discord.SelectOption(label="Seguranca",        value="seguranca",     description="Anti-ban, anti-raid, anti-spam e protecoes"),
+            discord.SelectOption(label="VIP",              value="vip",           description="Sistema VIP, cargos e anti-ban"),
+            discord.SelectOption(label="Painel de Cargos", value="painelcargos",  description="Painel interativo para setar cargos"),
+            discord.SelectOption(label="Permissoes",       value="permissoes",    description="Cargos de ban, limites e permissao de dono"),
+            discord.SelectOption(label="CL",               value="cl",            description="Limpar mensagens e gatilhos CL"),
+            discord.SelectOption(label="Tickets",          value="tickets",       description="Sistema de tickets e painel de suporte"),
+            discord.SelectOption(label="Boas-vindas",      value="boasvindas",    description="Mensagem automatica para novos membros"),
+            discord.SelectOption(label="Sorteio",          value="sorteio",       description="Criar e gerenciar sorteios"),
+            discord.SelectOption(label="Instagram",        value="instagram",     description="Postar e configurar o canal de Instagram"),
+            discord.SelectOption(label="Configuracao",     value="configuracao",  description="Prefixo, cor, logs, cargos do sistema"),
+            discord.SelectOption(label="Geral",            value="geral",         description="Ping, status e outros comandos gerais"),
         ]
         super().__init__(placeholder="Escolha uma categoria...", options=options, row=0)
 
