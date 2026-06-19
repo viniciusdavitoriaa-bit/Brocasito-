@@ -3832,6 +3832,9 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         e.add_field(name="Mensagem em Massa", value=(
             f"`{p}enviarmsg` — abrir painel para enviar embed por DM a todos os membros"
         ), inline=False)
+        e.add_field(name="Ativacao", value=(
+            f"`{p}ativar <chave>` — ativar o bot no servidor (apenas dono do servidor)"
+        ), inline=False)
         return e
 
     if category == "geral":
