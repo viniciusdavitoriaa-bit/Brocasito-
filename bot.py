@@ -6266,6 +6266,50 @@ async def check_punishments_task():
         except Exception as e:
             print(f"[TASK] check_punishments_task: {e}", flush=True)
 
+class DrawNewView(discord.ui.View):
+    """View com botão Draw New para sortear outro participante após o encerramento."""
+
+    def __init__(self, participants: list, already_picked: list, prize: str):
+        super().__init__(timeout=None)
+        self.participants = list(participants)
+        self.already_picked = set(str(u) for u in already_picked)
+        self.prize = prize
+        # Desativa o botão imediatamente se não há mais ninguém disponível
+        if not self._remaining():
+            self.draw_new_btn.disabled = True
+
+    def _remaining(self):
+        return [u for u in self.participants if str(u) not in self.already_picked]
+
+    @discord.ui.button(label="Draw New 🎉", style=discord.ButtonStyle.primary)
+    async def draw_new_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        is_admin = (interaction.user.guild_permissions.administrator
+                    or interaction.user.id == interaction.guild.owner_id)
+        if not is_admin:
+            return await interaction.response.send_message(
+                "Apenas admins podem sortear novamente.", ephemeral=True)
+        remaining = self._remaining()
+        if not remaining:
+            button.disabled = True
+            await interaction.response.edit_message(view=self)
+            return await interaction.followup.send(
+                "Todos os participantes já foram sorteados.", ephemeral=True)
+        winner_id = _random.choice(remaining)
+        self.already_picked.add(str(winner_id))
+        if not self._remaining():
+            button.disabled = True
+        embed = discord.Embed(
+            title="🎉 Sorteio Encerrado!",
+            description=(
+                f"**Prêmio:** {self.prize}\n"
+                f"**Novo vencedor:** <@{winner_id}>\n\n"
+                f"Parabéns!"
+            ),
+            color=EMBED_COLOR,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 @_tasks.loop(seconds=30)
 async def check_giveaways_task():
     """Encerra sorteios que passaram do prazo."""
@@ -6277,13 +6321,32 @@ async def check_giveaways_task():
                 db_end_giveaway(row["id"], [])
                 continue
             channel = guild.get_channel(int(row["channel_id"]))
-            entries = list(row.get("entries") or [])
             winners_count = row.get("winners_count", 1)
             prize = row.get("prize", "Prêmio")
+
+            # Busca participantes pelas reações 🎉 na mensagem original
+            participants = []
+            orig_msg = None
+            if channel and row.get("message_id"):
+                try:
+                    orig_msg = await channel.fetch_message(int(row["message_id"]))
+                    for reaction in orig_msg.reactions:
+                        if str(reaction.emoji) == "🎉":
+                            async for user in reaction.users():
+                                if not user.bot:
+                                    participants.append(user.id)
+                            break
+                except Exception:
+                    pass
+
+            # Fallback para entries do DB caso não consiga buscar reações
+            if not participants:
+                participants = [int(e) for e in (row.get("entries") or []) if e]
+
             winners = []
-            if entries:
-                sample = min(winners_count, len(entries))
-                winners = _random.sample(entries, sample)
+            if participants:
+                sample = min(winners_count, len(participants))
+                winners = _random.sample(participants, sample)
 
             db_end_giveaway(row["id"], winners)
 
@@ -6299,24 +6362,26 @@ async def check_giveaways_task():
                         ),
                         color=EMBED_COLOR,
                     )
+                    view = DrawNewView(participants, winners, prize)
                 else:
                     embed = discord.Embed(
                         title="🎉 Sorteio Encerrado",
                         description=f"**Prêmio:** {prize}\n\nNinguém participou.",
                         color=EMBED_COLOR,
                     )
-                await channel.send(embed=embed)
+                    view = None
+                await channel.send(embed=embed, view=view)
 
-                # Tenta atualizar mensagem original
-                if row.get("message_id"):
-                    try:
-                        msg = await channel.fetch_message(int(row["message_id"]))
-                        e2 = msg.embeds[0] if msg.embeds else discord.Embed()
+                # Atualiza mensagem original do sorteio
+                try:
+                    target = orig_msg or (await channel.fetch_message(int(row["message_id"])) if row.get("message_id") else None)
+                    if target:
+                        e2 = target.embeds[0].copy() if target.embeds else discord.Embed()
                         e2.title = "🎉 SORTEIO ENCERRADO 🎉"
                         e2.color = 0x555555
-                        await msg.edit(embed=e2)
-                    except Exception:
-                        pass
+                        await target.edit(embed=e2)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[TASK] check_giveaways_task: {e}", flush=True)
 
