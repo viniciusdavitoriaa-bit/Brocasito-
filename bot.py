@@ -5602,49 +5602,66 @@ class _TicketOpcaoAddModal(discord.ui.Modal, title="Adicionar Opcao de Ticket"):
         await interaction.response.edit_message(embed=embed)
 
 
-class _TicketOpcaoRemoveModal(discord.ui.Modal, title="Remover Opcao de Ticket"):
-    num_input: discord.ui.TextInput = discord.ui.TextInput(
-        label="Numero da opcao para remover (0 = limpar tudo)",
-        placeholder="Ex: 1",
-        required=True,
-        max_length=3,
-    )
+class TicketRemoveOpcaoView(discord.ui.View):
+    """View efemera com select para remover uma opcao ou limpar tudo."""
 
-    def __init__(self, guild_id: int):
-        super().__init__()
+    def __init__(self, guild_id: int, options: list[dict], original_message):
+        super().__init__(timeout=60)
         self.guild_id = guild_id
+        self.original_message = original_message
 
-    async def on_submit(self, interaction: discord.Interaction):
-        val = self.num_input.value.strip()
+        select_opts = [
+            discord.SelectOption(
+                label="Limpar TODAS as opcoes",
+                value="__all__",
+                description="Remove todas as opcoes do painel",
+            )
+        ]
+        for i, opt in enumerate(options[:24]):
+            emoji_raw = opt.get("emoji") or None
+            emoji_obj = None
+            if emoji_raw:
+                try:
+                    emoji_obj = discord.PartialEmoji.from_str(emoji_raw)
+                except Exception:
+                    emoji_obj = None
+            lbl = f"{i+1}. {opt.get('label', 'Opcao')}".strip()[:100]
+            select_opts.append(
+                discord.SelectOption(label=lbl, value=str(i), emoji=emoji_obj)
+            )
+
+        sel = discord.ui.Select(
+            placeholder="Selecione a opcao para remover...",
+            options=select_opts,
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
         gd = get_guild_data(self.guild_id)
         options = list(gd["ticket_config"].get("options", []))
 
-        # Valida o numero antes de responder
-        try:
-            num = int(val)
-        except ValueError:
-            await interaction.response.send_message("Digite um numero valido.", ephemeral=True)
-            return
-
-        if num != 0 and not (1 <= num <= len(options)):
-            await interaction.response.send_message(
-                f"Numero invalido. Ha {len(options)} opcao(es). Use 0 para limpar tudo.",
-                ephemeral=True,
-            )
-            return
-
-        # Responde ao modal antes de fazer qualquer outra coisa
-        await interaction.response.defer()
-
-        if num == 0:
+        if value == "__all__":
             gd["ticket_config"]["options"] = []
+            msg = "Todas as opcoes foram removidas."
         else:
-            options.pop(num - 1)
-            gd["ticket_config"]["options"] = options
+            idx = int(value)
+            if 0 <= idx < len(options):
+                removed = options.pop(idx)
+                gd["ticket_config"]["options"] = options
+                msg = f"Opcao **{removed.get('label', '')}** removida."
+            else:
+                msg = "Opcao nao encontrada."
 
         update_guild_data(self.guild_id, gd)
         embed = _build_ticket_config_embed(interaction.guild, gd)
-        await interaction.message.edit(embed=embed)
+
+        await interaction.response.edit_message(content=f"✅ {msg}", view=None)
+        try:
+            await self.original_message.edit(embed=embed)
+        except Exception:
+            pass
 
 
 # ── View principal com botoes cinzas ─────────────────────────────────────────
@@ -5750,8 +5767,16 @@ class TicketConfigView(discord.ui.View):
     async def btn_opcao_remove(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
-        modal = _TicketOpcaoRemoveModal(self.guild_id)
-        await interaction.response.send_modal(modal)
+        gd = get_guild_data(self.guild_id)
+        options = gd["ticket_config"].get("options", [])
+        if not options:
+            return await interaction.response.send_message(
+                "Nenhuma opcao cadastrada ainda.", ephemeral=True
+            )
+        view = TicketRemoveOpcaoView(self.guild_id, options, interaction.message)
+        await interaction.response.send_message(
+            "Selecione a opcao que deseja remover:", view=view, ephemeral=True
+        )
 
     @discord.ui.button(label="Publicar Painel", style=discord.ButtonStyle.success, row=3)
     async def btn_publicar(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5807,13 +5832,33 @@ class TicketConfigView(discord.ui.View):
 
 @bot.command(name="criarticket")
 async def criar_ticket_panel(ctx):
-    """Abre o painel interativo de configuracao de tickets com botoes."""
+    """Abre o painel interativo de configuracao de tickets com botoes (reset a cada uso)."""
     if not ctx.guild:
         return
     if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
         return await reply_and_delete(ctx, error_embed("Apenas o dono ou admins podem usar este comando.", ctx.guild))
 
+    # Reseta as configuracoes do painel para comecar do zero
     gd = get_guild_data(ctx.guild.id)
+    tc = gd.setdefault("ticket_config", {})
+    counter = tc.get("counter", 0)
+    assume_roles = tc.get("assume_role_ids", [])
+    panels = tc.get("panels", [])
+    gd["ticket_config"] = {
+        "title": "Suporte — Abrir Ticket",
+        "description": "Clique no botao abaixo para abrir um ticket.\nNossa equipe respondera em breve.",
+        "open_description": None,
+        "category_id": None,
+        "support_role_ids": [],
+        "assume_role_ids": assume_roles,
+        "counter": counter,
+        "options": [],
+        "banner_url": None,
+        "banner_position": "bottom",
+        "panels": panels,
+    }
+    update_guild_data(ctx.guild.id, gd)
+
     embed = _build_ticket_config_embed(ctx.guild, gd)
     view = TicketConfigView(ctx.guild.id)
 
@@ -5822,7 +5867,7 @@ async def criar_ticket_panel(ctx):
     except Exception:
         pass
 
-    await ctx.send(embed=embed, view=view, ephemeral=False)
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.command(name="addassumerole")
