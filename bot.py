@@ -4745,54 +4745,57 @@ def _get_panel_cfg(gd: dict, panel_id: int) -> dict:
     return merged
 
 
-class TicketButtonsView(discord.ui.View):
-    """Painel com um botão por opção (substituiu o dropdown)."""
+class TicketSelectView(discord.ui.View):
+    """Painel com select menu (dropdown) para escolher o tipo de ticket."""
 
     def __init__(self, options_data: list[dict], guild_id: int, panel_id: int = 0):
         super().__init__(timeout=None)
         self.guild_id = guild_id
         self.panel_id = panel_id
-        for i, item in enumerate(options_data[:25]):
+
+        select_options = []
+        for item in options_data[:25]:
             label = item.get("label", "Opcao")[:80]
             emoji_raw = item.get("emoji") or None
-            row = i // 5
-            cid = f"topt_{guild_id}_{panel_id}_{i}"
-            try:
-                btn = discord.ui.Button(
-                    label=label,
-                    emoji=emoji_raw,
-                    style=discord.ButtonStyle.secondary,
-                    custom_id=cid,
-                    row=row,
-                )
-            except Exception:
-                btn = discord.ui.Button(
-                    label=label,
-                    style=discord.ButtonStyle.secondary,
-                    custom_id=cid,
-                    row=row,
-                )
-            btn.callback = self._make_callback(label, panel_id)
-            self.add_item(btn)
+            emoji_obj = None
+            if emoji_raw:
+                try:
+                    emoji_obj = discord.PartialEmoji.from_str(emoji_raw)
+                except Exception:
+                    emoji_obj = None
+            opt = discord.SelectOption(label=label, value=label, emoji=emoji_obj)
+            select_options.append(opt)
 
-    def _make_callback(self, option_label: str, panel_id: int):
-        async def _cb(interaction: discord.Interaction):
-            guild = interaction.guild
-            if not guild:
-                return await interaction.response.send_message("Erro.", ephemeral=True)
-            existing = _user_has_open_ticket(guild, interaction.user.id)
-            if existing:
-                return await interaction.response.send_message(
-                    f"Voce ja tem um ticket aberto: {existing.mention}", ephemeral=True
-                )
-            await interaction.response.defer(ephemeral=True)
-            gd = get_guild_data(guild.id)
-            cfg = _get_panel_cfg(gd, panel_id)
-            ticket_ch = await _create_ticket_channel(guild, interaction.user, cfg, option_label)
-            if not ticket_ch:
-                return await interaction.followup.send("Sem permissao para criar canais.", ephemeral=True)
-            await interaction.followup.send(f"Ticket aberto! {ticket_ch.mention}", ephemeral=True)
-        return _cb
+        cid = f"ticket_select_{guild_id}_{panel_id}"
+        select = discord.ui.Select(
+            placeholder="Selecione uma opção...",
+            options=select_options,
+            custom_id=cid,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("Erro.", ephemeral=True)
+        existing = _user_has_open_ticket(guild, interaction.user.id)
+        if existing:
+            return await interaction.response.send_message(
+                f"Voce ja tem um ticket aberto: {existing.mention}", ephemeral=True
+            )
+        option_label = interaction.data["values"][0]
+        await interaction.response.defer(ephemeral=True)
+        gd = get_guild_data(guild.id)
+        cfg = _get_panel_cfg(gd, self.panel_id)
+        ticket_ch = await _create_ticket_channel(guild, interaction.user, cfg, option_label)
+        if not ticket_ch:
+            return await interaction.followup.send("Sem permissao para criar canais.", ephemeral=True)
+        await interaction.followup.send(f"Ticket aberto! {ticket_ch.mention}", ephemeral=True)
+
+
+# Alias mantido para compatibilidade com painéis já publicados com botões
+TicketButtonsView = TicketSelectView
 
 
 # ─── Painel com Botão simples (sem categorias) ────────────────────────────────
@@ -5614,25 +5617,34 @@ class _TicketOpcaoRemoveModal(discord.ui.Modal, title="Remover Opcao de Ticket")
     async def on_submit(self, interaction: discord.Interaction):
         val = self.num_input.value.strip()
         gd = get_guild_data(self.guild_id)
-        options = gd["ticket_config"].get("options", [])
+        options = list(gd["ticket_config"].get("options", []))
+
+        # Valida o numero antes de responder
         try:
             num = int(val)
         except ValueError:
             await interaction.response.send_message("Digite um numero valido.", ephemeral=True)
             return
-        if num == 0:
-            gd["ticket_config"]["options"] = []
-        elif 1 <= num <= len(options):
-            options.pop(num - 1)
-            gd["ticket_config"]["options"] = options
-        else:
+
+        if num != 0 and not (1 <= num <= len(options)):
             await interaction.response.send_message(
-                f"Numero invalido. Ha {len(options)} opcoes.", ephemeral=True
+                f"Numero invalido. Ha {len(options)} opcao(es). Use 0 para limpar tudo.",
+                ephemeral=True,
             )
             return
+
+        # Responde ao modal antes de fazer qualquer outra coisa
+        await interaction.response.defer()
+
+        if num == 0:
+            gd["ticket_config"]["options"] = []
+        else:
+            options.pop(num - 1)
+            gd["ticket_config"]["options"] = options
+
         update_guild_data(self.guild_id, gd)
         embed = _build_ticket_config_embed(interaction.guild, gd)
-        await interaction.response.edit_message(embed=embed)
+        await interaction.message.edit(embed=embed)
 
 
 # ── View principal com botoes cinzas ─────────────────────────────────────────
@@ -5764,8 +5776,6 @@ class TicketConfigView(discord.ui.View):
             color=color,
             timestamp=datetime.now(timezone.utc),
         )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
         banner_url = cfg.get("banner_url")
         banner_pos = cfg.get("banner_position", "bottom")
         if banner_url and banner_pos == "bottom":
@@ -5775,7 +5785,7 @@ class TicketConfigView(discord.ui.View):
         embed.set_footer(text=guild.name)
 
         options = cfg.get("options", [])
-        view = TicketButtonsView(options, self.guild_id, 0) if options else TicketOpenView(self.guild_id, 0)
+        view = TicketSelectView(options, self.guild_id, 0) if options else TicketOpenView(self.guild_id, 0)
 
         # Confirma na mensagem efemera e envia o painel publico
         await interaction.response.edit_message(
