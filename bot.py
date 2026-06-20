@@ -224,6 +224,12 @@ def _make_default_guild_data():
         "mute_call_role_id": None,
         "antiban_role_id": None,
         "giveaway_manager_roles": [],
+        # ── Instagram ─────────────────────────────────────────────────────────
+        "instagram_config": {
+            "channel_id": None,
+            "role_id": None,
+        },
+        "instagram_posts": {},
     }
 
 def _apply_guild_defaults(gd: dict):
@@ -307,9 +313,16 @@ def _apply_guild_defaults(gd: dict):
         ("mute_call_role_id", None),
         ("antiban_role_id", None),
         ("giveaway_manager_roles", []),
+        ("instagram_config", {"channel_id": None, "role_id": None}),
+        ("instagram_posts", {}),
     ]:
         if nk not in gd:
             gd[nk] = nv
+            changed = True
+    ic = gd.setdefault("instagram_config", {})
+    for ik, iv in [("channel_id", None), ("role_id", None)]:
+        if ik not in ic:
+            ic[ik] = iv
             changed = True
     return gd, changed
 
@@ -1730,6 +1743,11 @@ async def on_message(message):
                     if isinstance(message.author, discord.Member) and _tem_permissao_cl(message.author, gd_msg):
                         await _executar_cl(message, gd_msg)
                     return
+        # ── Instagram: intercepta fotos no canal configurado ──
+        if message.attachments:
+            handled = await _handle_instagram_post(message)
+            if handled:
+                return
         await bot.process_commands(message)
     except Exception as e:
         print(f"[ERRO] on_message: {e}", flush=True)
@@ -6752,6 +6770,348 @@ async def _start_tasks():
         check_punishments_task.start()
     if not check_giveaways_task.is_running():
         check_giveaways_task.start()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SISTEMA INSTAGRAM — postar fotos com curtidas e comentarios
+# ══════════════════════════════════════════════════════════════════════════════
+
+_INSTA_IMG_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".webm")
+
+
+def _insta_get_post(guild_id: int, message_id: int) -> dict | None:
+    gd = get_guild_data(guild_id)
+    return gd.get("instagram_posts", {}).get(str(message_id))
+
+
+def _insta_save_post(guild_id: int, message_id: int, post: dict):
+    gd = get_guild_data(guild_id)
+    gd.setdefault("instagram_posts", {})[str(message_id)] = post
+    update_guild_data(guild_id, gd)
+
+
+def _insta_delete_post(guild_id: int, message_id: int):
+    gd = get_guild_data(guild_id)
+    gd.setdefault("instagram_posts", {}).pop(str(message_id), None)
+    update_guild_data(guild_id, gd)
+
+
+def _insta_build_embed(member: discord.Member | None, post: dict) -> discord.Embed:
+    embed = discord.Embed(color=0xE1306C)
+    author_name = post.get("author_name", "Desconhecido")
+    author_avatar = post.get("author_avatar")
+    embed.set_author(name=author_name, icon_url=author_avatar)
+    if post.get("image_url"):
+        embed.set_image(url=post["image_url"])
+    likes_count = len(post.get("likes", []))
+    comments_count = len(post.get("comments", []))
+    footer_parts = []
+    if likes_count:
+        footer_parts.append(f"❤️ {likes_count} curtida{'s' if likes_count != 1 else ''}")
+    if comments_count:
+        footer_parts.append(f"💬 {comments_count} comentario{'s' if comments_count != 1 else ''}")
+    if footer_parts:
+        embed.set_footer(text="  ·  ".join(footer_parts))
+    return embed
+
+
+class _InstaCommentModal(discord.ui.Modal, title="Adicionar Comentario"):
+    texto = discord.ui.TextInput(
+        label="Seu comentario",
+        placeholder="Escreva algo...",
+        max_length=500,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(self, guild_id: int, message_id: int, original_message):
+        super().__init__()
+        self.guild_id = guild_id
+        self.message_id = message_id
+        self.original_message = original_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.texto.value.strip()
+        if not text:
+            return await interaction.response.send_message("Comentario vazio.", ephemeral=True)
+        post = _insta_get_post(self.guild_id, self.message_id)
+        if not post:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        post.setdefault("comments", []).append({
+            "author_id": interaction.user.id,
+            "author_name": interaction.user.display_name,
+            "text": text,
+        })
+        _insta_save_post(self.guild_id, self.message_id, post)
+        new_view = InstaPostView(self.guild_id, self.message_id, post["author_id"])
+        embed = _insta_build_embed(interaction.user, post)
+        await interaction.response.send_message("✅ Comentario adicionado!", ephemeral=True)
+        try:
+            await self.original_message.edit(embed=embed, view=new_view)
+        except Exception:
+            pass
+
+
+class InstaPostView(discord.ui.View):
+    """View persistente dos posts do Instagram do servidor."""
+
+    def __init__(self, guild_id: int, message_id: int, author_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.message_id = message_id
+        self.author_id = author_id
+
+        post = _insta_get_post(guild_id, message_id) or {}
+        likes_count = len(post.get("likes", []))
+        comments_count = len(post.get("comments", []))
+
+        # ── Linha 0: curtir, comentar, ver comentarios, ver curtidas ──────────
+        like_btn = discord.ui.Button(
+            emoji="❤️",
+            label=str(likes_count),
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id=f"insta_like_{guild_id}_{message_id}",
+        )
+        like_btn.callback = self._cb_like
+        self.add_item(like_btn)
+
+        comment_btn = discord.ui.Button(
+            emoji="💬",
+            label=str(comments_count),
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id=f"insta_cmt_{guild_id}_{message_id}",
+        )
+        comment_btn.callback = self._cb_comment
+        self.add_item(comment_btn)
+
+        view_cmt_btn = discord.ui.Button(
+            emoji="📷",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id=f"insta_vcmt_{guild_id}_{message_id}",
+        )
+        view_cmt_btn.callback = self._cb_view_comments
+        self.add_item(view_cmt_btn)
+
+        more_btn = discord.ui.Button(
+            label="···",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id=f"insta_more_{guild_id}_{message_id}",
+        )
+        more_btn.callback = self._cb_more
+        self.add_item(more_btn)
+
+        # ── Linha 1: deletar ─────────────────────────────────────────────────
+        del_btn = discord.ui.Button(
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger,
+            row=1,
+            custom_id=f"insta_del_{guild_id}_{message_id}",
+        )
+        del_btn.callback = self._cb_delete
+        self.add_item(del_btn)
+
+    # ── Callbacks ────────────────────────────────────────────────────────────
+
+    async def _cb_like(self, interaction: discord.Interaction):
+        post = _insta_get_post(self.guild_id, self.message_id)
+        if not post:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        likes: list = post.setdefault("likes", [])
+        uid = interaction.user.id
+        if uid in likes:
+            likes.remove(uid)
+        else:
+            likes.append(uid)
+        post["likes"] = likes
+        _insta_save_post(self.guild_id, self.message_id, post)
+        new_view = InstaPostView(self.guild_id, self.message_id, self.author_id)
+        embed = _insta_build_embed(None, post)
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+    async def _cb_comment(self, interaction: discord.Interaction):
+        modal = _InstaCommentModal(self.guild_id, self.message_id, interaction.message)
+        await interaction.response.send_modal(modal)
+
+    async def _cb_view_comments(self, interaction: discord.Interaction):
+        post = _insta_get_post(self.guild_id, self.message_id)
+        if not post:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        comments = post.get("comments", [])
+        if not comments:
+            return await interaction.response.send_message("Nenhum comentario ainda.", ephemeral=True)
+        embed = discord.Embed(title="💬 Comentarios", color=0xE1306C)
+        lines = []
+        for c in comments[-25:]:
+            lines.append(f"**{c.get('author_name', '?')}** — {c['text']}")
+        embed.description = "\n".join(lines)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _cb_more(self, interaction: discord.Interaction):
+        post = _insta_get_post(self.guild_id, self.message_id)
+        if not post:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        likes = post.get("likes", [])
+        embed = discord.Embed(title="❤️ Curtidas", color=0xE1306C)
+        if likes:
+            lines = []
+            for uid in likes[:30]:
+                m = interaction.guild.get_member(uid)
+                lines.append(f"❤️ {m.display_name if m else f'<@{uid}>'}")
+            embed.description = "\n".join(lines)
+        else:
+            embed.description = "Nenhuma curtida ainda."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _cb_delete(self, interaction: discord.Interaction):
+        post = _insta_get_post(self.guild_id, self.message_id)
+        if not post:
+            return await interaction.response.send_message("Post nao encontrado.", ephemeral=True)
+        is_author = interaction.user.id == post.get("author_id")
+        is_admin = interaction.user.guild_permissions.administrator
+        is_owner = interaction.user.id == interaction.guild.owner_id
+        if not (is_author or is_admin or is_owner):
+            return await interaction.response.send_message(
+                "Apenas o autor ou admins podem excluir este post.", ephemeral=True
+            )
+        _insta_delete_post(self.guild_id, self.message_id)
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+
+async def _handle_instagram_post(message: discord.Message):
+    """Intercepta fotos no canal Instagram e posta o embed interativo."""
+    gd = get_guild_data(message.guild.id)
+    ic = gd.get("instagram_config", {})
+    channel_id = ic.get("channel_id")
+    role_id = ic.get("role_id")
+
+    if not channel_id or message.channel.id != int(channel_id):
+        return False
+
+    # Deleta a mensagem original independente de ter cargo
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Verifica cargo
+    if role_id:
+        member_role_ids = [r.id for r in message.author.roles]
+        if int(role_id) not in member_role_ids:
+            try:
+                warn = await message.channel.send(
+                    f"{message.author.mention} Voce precisa ter o cargo <@&{role_id}> para postar fotos aqui.",
+                    delete_after=8,
+                )
+            except Exception:
+                pass
+            return True
+
+    # Verifica se tem imagem/video
+    image_url = None
+    for att in message.attachments:
+        if any(att.filename.lower().endswith(ext) for ext in _INSTA_IMG_EXT):
+            image_url = att.url
+            break
+
+    if not image_url:
+        return True  # mensagem deletada, sem imagem
+
+    post = {
+        "author_id": message.author.id,
+        "author_name": message.author.display_name,
+        "author_avatar": str(message.author.display_avatar.url),
+        "image_url": image_url,
+        "likes": [],
+        "comments": [],
+    }
+
+    embed = _insta_build_embed(message.author, post)
+
+    # Envia o embed primeiro (sem view) para obter o message_id
+    sent = await message.channel.send(embed=embed)
+
+    # Salva o post com o ID correto e recria o embed + view
+    _insta_save_post(message.guild.id, sent.id, post)
+    view = InstaPostView(message.guild.id, sent.id, message.author.id)
+    await sent.edit(view=view)
+    return True
+
+
+# ─── Comandos de configuracao Instagram ─────────────────────────────────────
+
+@bot.command(name="setinstacanal")
+async def set_insta_canal(ctx, canal: discord.TextChannel = None):
+    """Define o canal de fotos do Instagram do servidor."""
+    if not ctx.guild:
+        return
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas o dono ou admins podem usar este comando.", ctx.guild))
+    if not canal:
+        return await reply_and_delete(ctx, error_embed(f"Use: `{ctx.prefix}setinstacanal #canal`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    gd.setdefault("instagram_config", {})["channel_id"] = canal.id
+    update_guild_data(ctx.guild.id, gd)
+    color = _get_embed_color(ctx.guild)
+    embed = discord.Embed(
+        description=f"✅ Canal de fotos definido para {canal.mention}.",
+        color=color,
+    )
+    await reply_and_delete(ctx, embed)
+
+
+@bot.command(name="setinstacargo")
+async def set_insta_cargo(ctx, cargo: discord.Role = None):
+    """Define o cargo necessario para postar fotos no Instagram do servidor."""
+    if not ctx.guild:
+        return
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas o dono ou admins podem usar este comando.", ctx.guild))
+    if not cargo:
+        return await reply_and_delete(ctx, error_embed(f"Use: `{ctx.prefix}setinstacargo @cargo`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    gd.setdefault("instagram_config", {})["role_id"] = cargo.id
+    update_guild_data(ctx.guild.id, gd)
+    color = _get_embed_color(ctx.guild)
+    embed = discord.Embed(
+        description=f"✅ Cargo para postar fotos definido: {cargo.mention}.",
+        color=color,
+    )
+    await reply_and_delete(ctx, embed)
+
+
+@bot.command(name="instastatus")
+async def insta_status(ctx):
+    """Mostra a configuracao atual do sistema Instagram."""
+    if not ctx.guild:
+        return
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Apenas o dono ou admins podem usar este comando.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    ic = gd.get("instagram_config", {})
+    ch_id = ic.get("channel_id")
+    ro_id = ic.get("role_id")
+    posts_count = len(gd.get("instagram_posts", {}))
+    color = _get_embed_color(ctx.guild)
+    embed = discord.Embed(title="📷 Instagram — Status", color=color)
+    embed.add_field(
+        name="Canal",
+        value=f"<#{ch_id}>" if ch_id else "Nao configurado",
+        inline=True,
+    )
+    embed.add_field(
+        name="Cargo para postar",
+        value=f"<@&{ro_id}>" if ro_id else "Qualquer um",
+        inline=True,
+    )
+    embed.add_field(name="Posts salvos", value=str(posts_count), inline=True)
+    await reply_and_delete(ctx, embed)
+
 
 # ─── Error Handler ────────────────────────────────────────────────────────────
 
