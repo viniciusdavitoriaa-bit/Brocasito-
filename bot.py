@@ -206,6 +206,9 @@ def _make_default_guild_data():
             "assume_role_ids": [],
             "counter": 0,
             "options": [],
+            "banner_url": None,
+            "banner_position": "bottom",
+            "panels": [],
         },
         "welcome_config": {
             "enabled": False,
@@ -251,6 +254,9 @@ def _apply_guild_defaults(gd: dict):
             "assume_role_ids": [],
             "counter": 0,
             "options": [],
+            "banner_url": None,
+            "banner_position": "bottom",
+            "panels": [],
         }),
     ]
     for key, default in defaults:
@@ -263,7 +269,13 @@ def _apply_guild_defaults(gd: dict):
             ar[k] = v
             changed = True
     tc = gd.setdefault("ticket_config", {})
-    for tk, tv in [("assume_role_ids", []), ("open_description", None)]:
+    for tk, tv in [
+        ("assume_role_ids", []),
+        ("open_description", None),
+        ("banner_url", None),
+        ("banner_position", "bottom"),
+        ("panels", []),
+    ]:
         if tk not in tc:
             tc[tk] = tv
             changed = True
@@ -3756,18 +3768,32 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
         return e
 
     if category == "tickets":
-        e = create_embed(guild, "yov! — Tickets")
+        e = create_embed(guild, f"{p[:-1]}help — Tickets")
         e.add_field(name="Painel", value=(
-            f"`{p}criarticket` — enviar o painel de abertura de tickets no canal atual"
+            f"`{p}criarticket` — envia o painel padrao no canal atual\n"
+            f"`{p}criarticket <N>` — envia o painel #N (multiplos paineis)"
         ), inline=False)
-        e.add_field(name="Configuracao (Admin/Dono)", value=(
-            f"`{p}addassumerole @cargo` — dar permissao de assumir tickets a um cargo\n"
+        e.add_field(name="Multiplos Paineis", value=(
+            f"`{p}setticket painel` — listar paineis criados\n"
+            f"`{p}setticket painel novo <titulo>` — criar novo painel\n"
+            f"`{p}setticket painel deletar <N>` — deletar painel\n"
+            f"`{p}setticket painel <N> titulo <texto>` — alterar titulo\n"
+            f"`{p}setticket painel <N> descricao <texto>` — alterar descricao\n"
+            f"`{p}setticket painel <N> categoria #cat` — definir categoria\n"
+            f"`{p}setticket painel <N> banner <url> [top|bottom]` — banner acima ou abaixo\n"
+            f"`{p}setticket painel <N> opcao add <emoji> <nome>` — adicionar botao\n"
+            f"`{p}setticket painel <N> opcao remove <num>` — remover botao\n"
+            f"`{p}setticket painel <N> opcao limpar` — limpar botoes"
+        ), inline=False)
+        e.add_field(name="Permissoes", value=(
+            f"`{p}addassumerole @cargo` — dar permissao de assumir tickets\n"
             f"`{p}removeassumerole @cargo` — remover permissao de assumir tickets\n"
-            f"`{p}assumeroles` — listar cargos com permissao de assumir tickets"
+            f"`{p}assumeroles` — listar cargos com permissao"
         ), inline=False)
         e.add_field(name="Sobre", value=(
-            "O sistema de tickets cria canais privados automaticamente.\n"
-            "Cargos de suporte definidos nas configuracoes tem acesso automatico a todos os tickets."
+            "Botoes sao exibidos dentro da embed (um por opcao).\n"
+            "Banner `top` = imagem acima da embed | `bottom` = imagem na embed.\n"
+            "Cargos de suporte tem acesso automatico a todos os tickets."
         ), inline=False)
         return e
 
@@ -4715,72 +4741,91 @@ def _user_has_open_ticket(guild: discord.Guild, user_id: int) -> discord.TextCha
     return None
 
 
-# ─── Painel com Dropdown de Categorias ───────────────────────────────────────
+# ─── Painel com Botões por Categoria ─────────────────────────────────────────
 
-class TicketCategorySelect(discord.ui.Select):
-    def __init__(self, options_data: list[dict]):
-        opts = []
-        for item in options_data[:25]:
-            emoji = item.get("emoji") or None
-            label = item.get("label", "Opcao")[:100]
-            try:
-                opts.append(discord.SelectOption(
-                    label=label,
-                    value=label,
-                    emoji=emoji,
-                    description=item.get("description", "")[:100] or None
-                ))
-            except Exception:
-                opts.append(discord.SelectOption(label=label, value=label))
-        super().__init__(
-            placeholder="Selecione uma opcao...",
-            min_values=1,
-            max_values=1,
-            options=opts,
-            custom_id="ticket_category_select"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if not guild:
-            return await interaction.response.send_message("Erro.", ephemeral=True)
-
-        existing = _user_has_open_ticket(guild, interaction.user.id)
-        if existing:
-            return await interaction.response.send_message(
-                f"Voce ja tem um ticket aberto: {existing.mention}", ephemeral=True
-            )
-
-        await interaction.response.defer(ephemeral=True)
-        gd = get_guild_data(guild.id)
-        cfg = gd.get("ticket_config", {})
-        option_label = self.values[0]
-
-        ticket_ch = await _create_ticket_channel(guild, interaction.user, cfg, option_label)
-        if not ticket_ch:
-            return await interaction.followup.send("Sem permissao para criar canais.", ephemeral=True)
-        await interaction.followup.send(f"Ticket aberto! {ticket_ch.mention}", ephemeral=True)
+def _get_panel_cfg(gd: dict, panel_id: int) -> dict:
+    """Retorna o config mesclado do painel especificado (base + overrides do painel)."""
+    base = gd.get("ticket_config", {})
+    if panel_id == 0:
+        return base
+    panels = base.get("panels", [])
+    panel = next((p for p in panels if p.get("id") == panel_id), None)
+    if not panel:
+        return base
+    merged = {**base, **panel}
+    return merged
 
 
-class TicketSelectView(discord.ui.View):
-    """Painel com dropdown de categorias."""
-    def __init__(self, options_data: list[dict]):
+class TicketButtonsView(discord.ui.View):
+    """Painel com um botão por opção (substituiu o dropdown)."""
+
+    def __init__(self, options_data: list[dict], guild_id: int, panel_id: int = 0):
         super().__init__(timeout=None)
-        self.add_item(TicketCategorySelect(options_data))
+        self.guild_id = guild_id
+        self.panel_id = panel_id
+        for i, item in enumerate(options_data[:25]):
+            label = item.get("label", "Opcao")[:80]
+            emoji_raw = item.get("emoji") or None
+            row = i // 5
+            cid = f"topt_{guild_id}_{panel_id}_{i}"
+            try:
+                btn = discord.ui.Button(
+                    label=label,
+                    emoji=emoji_raw,
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=cid,
+                    row=row,
+                )
+            except Exception:
+                btn = discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=cid,
+                    row=row,
+                )
+            btn.callback = self._make_callback(label, panel_id)
+            self.add_item(btn)
+
+    def _make_callback(self, option_label: str, panel_id: int):
+        async def _cb(interaction: discord.Interaction):
+            guild = interaction.guild
+            if not guild:
+                return await interaction.response.send_message("Erro.", ephemeral=True)
+            existing = _user_has_open_ticket(guild, interaction.user.id)
+            if existing:
+                return await interaction.response.send_message(
+                    f"Voce ja tem um ticket aberto: {existing.mention}", ephemeral=True
+                )
+            await interaction.response.defer(ephemeral=True)
+            gd = get_guild_data(guild.id)
+            cfg = _get_panel_cfg(gd, panel_id)
+            ticket_ch = await _create_ticket_channel(guild, interaction.user, cfg, option_label)
+            if not ticket_ch:
+                return await interaction.followup.send("Sem permissao para criar canais.", ephemeral=True)
+            await interaction.followup.send(f"Ticket aberto! {ticket_ch.mention}", ephemeral=True)
+        return _cb
 
 
 # ─── Painel com Botão simples (sem categorias) ────────────────────────────────
 
 class TicketOpenView(discord.ui.View):
-    """Painel com botão simples quando nao ha categorias configuradas."""
+    """Painel com botao simples quando nao ha categorias configuradas."""
 
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, panel_id: int = 0):
         super().__init__(timeout=None)
         self.guild_id = guild_id
+        self.panel_id = panel_id
+        cid = f"ticket_open_btn_{panel_id}" if panel_id else "ticket_open_btn"
+        btn = discord.ui.Button(
+            label="Abrir Ticket",
+            style=discord.ButtonStyle.secondary,
+            emoji="🎫",
+            custom_id=cid,
+        )
+        btn.callback = self._open_ticket
+        self.add_item(btn)
 
-    @discord.ui.button(label="Abrir Ticket", style=discord.ButtonStyle.secondary,
-                       emoji="🎫", custom_id="ticket_open_btn")
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _open_ticket(self, interaction: discord.Interaction):
         guild = interaction.guild
         if not guild:
             return await interaction.response.send_message("Erro.", ephemeral=True)
@@ -4793,7 +4838,7 @@ class TicketOpenView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
         gd = get_guild_data(guild.id)
-        cfg = gd.get("ticket_config", {})
+        cfg = _get_panel_cfg(gd, self.panel_id)
 
         ticket_ch = await _create_ticket_channel(guild, interaction.user, cfg)
         if not ticket_ch:
@@ -5327,14 +5372,15 @@ async def setticket(ctx):
         f"**Tickets abertos:** {cfg.get('counter', 0)}\n\n"
         f"**Opcoes do dropdown:**\n{opts_txt}\n\n"
         f"**Comandos:**\n"
-        f"`{p}setticket titulo <texto>`\n"
-        f"`{p}setticket descricao <texto>`\n"
-        f"`{p}setticket categoria #categoria`\n"
-        f"`{p}setticket suporte @cargo`\n"
-        f"`{p}setticket opcao add <emoji> <nome>` — ex: `{p}setticket opcao add 💀 duvidas`\n"
-        f"`{p}setticket opcao remove <numero>` — ex: `{p}setticket opcao remove 1`\n"
-        f"`{p}setticket opcao limpar` — remove todas as opcoes\n"
-        f"`{p}criarticket` — envia o painel neste canal"
+        f"`{p}setticket titulo <texto>` — titulo do painel padrao\n"
+        f"`{p}setticket descricao <texto>` — descricao do painel padrao\n"
+        f"`{p}setticket categoria #categoria` — categoria dos tickets\n"
+        f"`{p}setticket suporte @cargo` — cargo de suporte\n"
+        f"`{p}setticket opcao add <emoji> <nome>` — adicionar botao ao painel padrao\n"
+        f"`{p}setticket opcao remove <numero>` — remover botao\n"
+        f"`{p}setticket opcao limpar` — limpar botoes\n"
+        f"`{p}setticket painel` — gerenciar multiplos paineis\n"
+        f"`{p}criarticket [N]` — envia o painel (ou painel #N) neste canal"
     )
     await reply_and_delete(ctx, embed)
 
@@ -5493,16 +5539,299 @@ async def setticket_opcao_limpar(ctx):
     await reply_and_delete(ctx, success_embed("Opcoes Removidas", "Painel voltara a exibir botao simples.", ctx.guild))
 
 
+# ─── setticket painel — múltiplos painéis ────────────────────────────────────
+
+@setticket.group(name="painel", invoke_without_command=True)
+async def setticket_painel(ctx):
+    """Lista os paineis de ticket criados."""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    p = gd.get("prefix", PREFIX)
+    panels = gd.get("ticket_config", {}).get("panels", [])
+    embed = create_embed(ctx.guild, "Paineis de Ticket")
+    if not panels:
+        embed.description = (
+            f"Nenhum painel criado.\n"
+            f"Use `{p}setticket painel novo <titulo>` para criar.\n\n"
+            f"Sem paineis, o comando `{p}criarticket` usa as configuracoes globais."
+        )
+    else:
+        lines = []
+        for pn in panels:
+            opts = pn.get("options", [])
+            banner = "✓" if pn.get("banner_url") else "✗"
+            lines.append(
+                f"**#{pn['id']}** — {pn.get('title', '—')}\n"
+                f"  Opcoes: {len(opts)} | Banner: {banner} ({pn.get('banner_position','bottom')})"
+            )
+        embed.description = "\n\n".join(lines)
+    embed.add_field(name="Comandos", value=(
+        f"`{p}setticket painel novo <titulo>`\n"
+        f"`{p}setticket painel deletar <numero>`\n"
+        f"`{p}setticket painel <N> titulo <texto>`\n"
+        f"`{p}setticket painel <N> descricao <texto>`\n"
+        f"`{p}setticket painel <N> categoria #cat`\n"
+        f"`{p}setticket painel <N> banner <url> [top|bottom]`\n"
+        f"`{p}setticket painel <N> opcao add <emoji> <nome>`\n"
+        f"`{p}setticket painel <N> opcao remove <num>`\n"
+        f"`{p}setticket painel <N> opcao limpar`\n"
+        f"`{p}criarticket <N>` — envia painel #N"
+    ), inline=False)
+    await reply_and_delete(ctx, embed)
+
+
+@setticket_painel.command(name="novo")
+async def setticket_painel_novo(ctx, *, titulo: str = None):
+    """Cria um novo painel de ticket. Uso: setticket painel novo <titulo>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not titulo:
+        return await reply_and_delete(ctx, error_embed("Informe o titulo do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    tc = gd.setdefault("ticket_config", {})
+    panels = tc.setdefault("panels", [])
+    # Gera ID unico
+    next_id = max((p.get("id", 0) for p in panels), default=0) + 1
+    panel = {
+        "id": next_id,
+        "title": titulo[:256],
+        "description": "Clique no botao abaixo para abrir um ticket.",
+        "open_description": None,
+        "category_id": None,
+        "support_role_ids": [],
+        "options": [],
+        "banner_url": None,
+        "banner_position": "bottom",
+    }
+    panels.append(panel)
+    update_guild_data(ctx.guild.id, gd)
+    p = gd.get("prefix", PREFIX)
+    await reply_and_delete(ctx, success_embed(
+        f"Painel #{next_id} Criado",
+        f"Titulo: **{titulo[:256]}**\n"
+        f"Configure com `{p}setticket painel {next_id} ...`\n"
+        f"Envie com `{p}criarticket {next_id}`",
+        ctx.guild
+    ))
+
+
+@setticket_painel.command(name="deletar")
+async def setticket_painel_deletar(ctx, numero: int = None):
+    """Remove um painel de ticket. Uso: setticket painel deletar <numero>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero:
+        return await reply_and_delete(ctx, error_embed("Informe o numero do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panels = gd.get("ticket_config", {}).get("panels", [])
+    panel = next((p for p in panels if p.get("id") == numero), None)
+    if not panel:
+        return await reply_and_delete(ctx, error_embed(f"Painel #{numero} nao encontrado.", ctx.guild))
+    panels.remove(panel)
+    gd["ticket_config"]["panels"] = panels
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Painel Removido", f"Painel #{numero} deletado.", ctx.guild))
+
+
+def _get_panel_or_error(ctx, numero, gd):
+    """Helper: retorna (panel_dict, None) ou (None, error_msg)."""
+    panels = gd.get("ticket_config", {}).get("panels", [])
+    panel = next((p for p in panels if p.get("id") == numero), None)
+    if not panel:
+        return None, f"Painel #{numero} nao encontrado. Use `setticket painel lista` para ver os paineis."
+    return panel, None
+
+
+@setticket_painel.command(name="titulo")
+async def setticket_painel_titulo(ctx, numero: int = None, *, titulo: str = None):
+    """Define o titulo de um painel. Uso: setticket painel <N> titulo <texto>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero or not titulo:
+        return await reply_and_delete(ctx, error_embed("Uso: `setticket painel <N> titulo <texto>`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    panel["title"] = titulo[:256]
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Titulo Atualizado", f"Painel #{numero}: **{titulo[:256]}**", ctx.guild))
+
+
+@setticket_painel.command(name="descricao")
+async def setticket_painel_descricao(ctx, numero: int = None, *, descricao: str = None):
+    """Define a descricao de um painel. Uso: setticket painel <N> descricao <texto>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero or not descricao:
+        return await reply_and_delete(ctx, error_embed("Uso: `setticket painel <N> descricao <texto>`", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    panel["description"] = descricao[:2048]
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Descricao Atualizada", f"Painel #{numero} atualizado.", ctx.guild))
+
+
+@setticket_painel.command(name="categoria")
+async def setticket_painel_categoria(ctx, numero: int = None, categoria: discord.CategoryChannel = None):
+    """Define a categoria dos canais de um painel. Uso: setticket painel <N> categoria #categoria"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero:
+        return await reply_and_delete(ctx, error_embed("Informe o numero do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    panel["category_id"] = str(categoria.id) if categoria else None
+    update_guild_data(ctx.guild.id, gd)
+    msg = f"Categoria do painel #{numero}: **{categoria.name}**" if categoria else f"Painel #{numero} criara tickets na raiz."
+    await reply_and_delete(ctx, success_embed("Categoria Definida", msg, ctx.guild))
+
+
+@setticket_painel.command(name="banner")
+async def setticket_painel_banner(ctx, numero: int = None, url: str = None, posicao: str = "bottom"):
+    """Define o banner de um painel. Uso: setticket painel <N> banner <url> [top|bottom]
+    top = imagem enviada acima da embed | bottom = imagem dentro da embed (padrao)"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero:
+        return await reply_and_delete(ctx, error_embed("Informe o numero do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    posicao = posicao.lower()
+    if posicao not in ("top", "bottom"):
+        posicao = "bottom"
+    if not url or url.lower() in ("none", "remover", "remove"):
+        panel["banner_url"] = None
+        update_guild_data(ctx.guild.id, gd)
+        return await reply_and_delete(ctx, success_embed("Banner Removido", f"Painel #{numero} sem banner.", ctx.guild))
+    panel["banner_url"] = url.strip()
+    panel["banner_position"] = posicao
+    update_guild_data(ctx.guild.id, gd)
+    pos_txt = "acima da embed (mensagem separada)" if posicao == "top" else "abaixo dentro da embed"
+    await reply_and_delete(ctx, success_embed(
+        "Banner Definido",
+        f"Painel #{numero} — banner definido.\nPosicao: **{pos_txt}**",
+        ctx.guild
+    ))
+
+
+@setticket_painel.group(name="opcao", invoke_without_command=True)
+async def setticket_painel_opcao(ctx, numero: int = None):
+    """Lista opcoes de um painel. Uso: setticket painel <N> opcao"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero:
+        return await reply_and_delete(ctx, error_embed("Informe o numero do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    p = gd.get("prefix", PREFIX)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    options = panel.get("options", [])
+    if not options:
+        return await reply_and_delete(ctx, create_embed(ctx.guild, f"Opcoes — Painel #{numero}",
+            f"Nenhuma opcao. Use `{p}setticket painel {numero} opcao add <emoji> <nome>`"))
+    lines = [f"`{i+1}.` {o.get('emoji','')} **{o.get('label','')}**" for i, o in enumerate(options)]
+    await reply_and_delete(ctx, create_embed(ctx.guild, f"Opcoes — Painel #{numero}", "\n".join(lines)))
+
+
+@setticket_painel_opcao.command(name="add")
+async def setticket_painel_opcao_add(ctx, numero: int = None, emoji: str = None, *, nome: str = None):
+    """Adiciona opcao a um painel. Uso: setticket painel <N> opcao add <emoji> <nome>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero or not emoji or not nome:
+        return await reply_and_delete(ctx, error_embed(
+            "Uso: `setticket painel <N> opcao add <emoji> <nome>`", ctx.guild
+        ))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    options = panel.setdefault("options", [])
+    if len(options) >= 25:
+        return await reply_and_delete(ctx, error_embed("Limite de 25 opcoes atingido.", ctx.guild))
+    options.append({"emoji": emoji, "label": nome[:80]})
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Opcao Adicionada",
+        f"Painel #{numero}: {emoji} **{nome}** adicionado.", ctx.guild))
+
+
+@setticket_painel_opcao.command(name="remove")
+async def setticket_painel_opcao_remove(ctx, numero: int = None, opcao_num: int = None):
+    """Remove opcao de um painel. Uso: setticket painel <N> opcao remove <num_opcao>"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero or not opcao_num:
+        return await reply_and_delete(ctx, error_embed(
+            "Uso: `setticket painel <N> opcao remove <num_opcao>`", ctx.guild
+        ))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    options = panel.get("options", [])
+    if opcao_num < 1 or opcao_num > len(options):
+        return await reply_and_delete(ctx, error_embed(f"Numero invalido. Ha {len(options)} opcoes.", ctx.guild))
+    removed = options.pop(opcao_num - 1)
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Opcao Removida",
+        f"Painel #{numero}: {removed.get('emoji','')} **{removed.get('label','')}** removida.", ctx.guild))
+
+
+@setticket_painel_opcao.command(name="limpar")
+async def setticket_painel_opcao_limpar(ctx, numero: int = None):
+    """Remove todas as opcoes de um painel. Uso: setticket painel <N> opcao limpar"""
+    if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
+        return await reply_and_delete(ctx, error_embed("Sem permissao.", ctx.guild))
+    if not numero:
+        return await reply_and_delete(ctx, error_embed("Informe o numero do painel.", ctx.guild))
+    gd = get_guild_data(ctx.guild.id)
+    panel, err = _get_panel_or_error(ctx, numero, gd)
+    if err:
+        return await reply_and_delete(ctx, error_embed(err, ctx.guild))
+    panel["options"] = []
+    update_guild_data(ctx.guild.id, gd)
+    await reply_and_delete(ctx, success_embed("Opcoes Removidas",
+        f"Painel #{numero}: todas as opcoes removidas.", ctx.guild))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 @bot.command(name="criarticket")
-async def criar_ticket_panel(ctx):
-    """Envia o painel de abertura de tickets neste canal."""
+async def criar_ticket_panel(ctx, numero: int = 0):
+    """Envia o painel de abertura de tickets neste canal. Uso: !criarticket [numero_do_painel]"""
     if not is_server_owner(ctx) and not ctx.author.guild_permissions.administrator:
         return await reply_and_delete(ctx, error_embed("Apenas o dono ou admins podem enviar o painel.", ctx.guild))
     if not ctx.guild:
         return
 
     gd = get_guild_data(ctx.guild.id)
-    cfg = gd.get("ticket_config", {})
+    base_cfg = gd.get("ticket_config", {})
+    panels = base_cfg.get("panels", [])
+
+    # Seleciona painel correto
+    panel_id = 0
+    if numero > 0:
+        panel = next((p for p in panels if p.get("id") == numero), None)
+        if not panel:
+            return await reply_and_delete(ctx, error_embed(
+                f"Painel #{numero} nao encontrado. Use `setticket painel lista` para ver os paineis.",
+                ctx.guild
+            ))
+        panel_id = numero
+    elif panels:
+        # Se nao informou numero mas ha paineis criados, usa o primeiro
+        panel_id = panels[0].get("id", 0)
+
+    cfg = _get_panel_cfg(gd, panel_id)
     color = get_guild_color(ctx.guild)
 
     embed = discord.Embed(
@@ -5513,8 +5842,16 @@ async def criar_ticket_panel(ctx):
     )
     if ctx.guild.icon:
         embed.set_thumbnail(url=ctx.guild.icon.url)
-    if ctx.guild.banner:
+
+    banner_url = cfg.get("banner_url")
+    banner_pos = cfg.get("banner_position", "bottom")
+
+    # Banner na parte inferior da embed
+    if banner_url and banner_pos == "bottom":
+        embed.set_image(url=banner_url)
+    elif not banner_url and ctx.guild.banner:
         embed.set_image(url=ctx.guild.banner.url)
+
     embed.set_footer(text=ctx.guild.name)
 
     try:
@@ -5522,11 +5859,18 @@ async def criar_ticket_panel(ctx):
     except Exception:
         pass
 
+    # Banner acima: envia imagem separada antes da embed
+    if banner_url and banner_pos == "top":
+        try:
+            await ctx.channel.send(banner_url)
+        except Exception:
+            pass
+
     options = cfg.get("options", [])
     if options:
-        view = TicketSelectView(options)
+        view = TicketButtonsView(options, ctx.guild.id, panel_id)
     else:
-        view = TicketOpenView(ctx.guild.id)
+        view = TicketOpenView(ctx.guild.id, panel_id)
 
     await ctx.channel.send(embed=embed, view=view)
 
