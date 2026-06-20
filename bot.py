@@ -5642,7 +5642,7 @@ class TicketConfigView(discord.ui.View):
         author_role_ids = {str(r.id) for r in member.roles}
         return bool(author_role_ids & set(owner_perm_roles))
 
-    @discord.ui.button(label="Titulo", style=discord.ButtonStyle.secondary, row=0, emoji="✏️")
+    @discord.ui.button(label="Titulo", style=discord.ButtonStyle.secondary, row=0)
     async def btn_titulo(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5654,7 +5654,7 @@ class TicketConfigView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Descricao", style=discord.ButtonStyle.secondary, row=0, emoji="📄")
+    @discord.ui.button(label="Descricao", style=discord.ButtonStyle.secondary, row=0)
     async def btn_descricao(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5666,7 +5666,7 @@ class TicketConfigView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Texto Abertura", style=discord.ButtonStyle.secondary, row=0, emoji="💬")
+    @discord.ui.button(label="Texto Abertura", style=discord.ButtonStyle.secondary, row=0)
     async def btn_abertura(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5678,7 +5678,7 @@ class TicketConfigView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Banner", style=discord.ButtonStyle.secondary, row=1, emoji="🖼️")
+    @discord.ui.button(label="Banner", style=discord.ButtonStyle.secondary, row=1)
     async def btn_banner(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5689,7 +5689,7 @@ class TicketConfigView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Cor", style=discord.ButtonStyle.secondary, row=1, emoji="🎨")
+    @discord.ui.button(label="Cor", style=discord.ButtonStyle.secondary, row=1)
     async def btn_cor(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5698,7 +5698,7 @@ class TicketConfigView(discord.ui.View):
         modal = _TicketCorModal(cfg.get("embed_color", ""), self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Categoria", style=discord.ButtonStyle.secondary, row=1, emoji="📂")
+    @discord.ui.button(label="Categoria", style=discord.ButtonStyle.secondary, row=1)
     async def btn_categoria(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
@@ -5707,28 +5707,28 @@ class TicketConfigView(discord.ui.View):
         modal = _TicketCategoriaModal(cfg.get("category_id", ""), self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Cargo Suporte", style=discord.ButtonStyle.secondary, row=2, emoji="🛡️")
+    @discord.ui.button(label="Cargo Suporte", style=discord.ButtonStyle.secondary, row=2)
     async def btn_suporte(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
         modal = _TicketSuporteModal(self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Add Opcao", style=discord.ButtonStyle.secondary, row=2, emoji="➕")
+    @discord.ui.button(label="Add Opcao", style=discord.ButtonStyle.secondary, row=2)
     async def btn_opcao_add(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
         modal = _TicketOpcaoAddModal(self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Remover Opcao", style=discord.ButtonStyle.secondary, row=2, emoji="🗑️")
+    @discord.ui.button(label="Remover Opcao", style=discord.ButtonStyle.secondary, row=2)
     async def btn_opcao_remove(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._check_perm(interaction):
             return await interaction.response.send_message("Sem permissao.", ephemeral=True)
         modal = _TicketOpcaoRemoveModal(self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Publicar Painel", style=discord.ButtonStyle.success, row=3, emoji="✅")
+    @discord.ui.button(label="Publicar Painel", style=discord.ButtonStyle.success, row=3)
     async def btn_publicar(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Publica o painel de ticket definitivo no canal atual."""
         if not self._check_perm(interaction):
@@ -5775,7 +5775,7 @@ class TicketConfigView(discord.ui.View):
                 pass
         await channel.send(embed=embed, view=view)
 
-    @discord.ui.button(label="Fechar", style=discord.ButtonStyle.danger, row=3, emoji="✖️")
+    @discord.ui.button(label="Fechar", style=discord.ButtonStyle.danger, row=3)
     async def btn_fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="Painel fechado.", embed=None, view=None)
 
