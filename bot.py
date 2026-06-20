@@ -5555,10 +5555,10 @@ class _TicketSuporteModal(discord.ui.Modal, title="Cargo de Suporte"):
 
 class _TicketOpcaoAddModal(discord.ui.Modal, title="Adicionar Opcao de Ticket"):
     emoji_input: discord.ui.TextInput = discord.ui.TextInput(
-        label="Emoji",
-        placeholder="Ex: 🎫",
-        required=True,
-        max_length=10,
+        label="Emoji (padrao ou personalizado do servidor)",
+        placeholder="Ex: 🎫  ou  <:nome:123456789012345678>",
+        required=False,
+        max_length=100,
     )
     nome_input: discord.ui.TextInput = discord.ui.TextInput(
         label="Nome do botao",
@@ -5572,14 +5572,27 @@ class _TicketOpcaoAddModal(discord.ui.Modal, title="Adicionar Opcao de Ticket"):
         self.guild_id = guild_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        emoji = self.emoji_input.value.strip()
+        emoji_raw = self.emoji_input.value.strip() or None
         nome = self.nome_input.value.strip()
+
+        # Valida emoji personalizado: tenta converter para PartialEmoji
+        emoji_val = emoji_raw
+        if emoji_raw and emoji_raw.startswith("<") and emoji_raw.endswith(">"):
+            try:
+                discord.PartialEmoji.from_str(emoji_raw)
+            except Exception:
+                await interaction.response.send_message(
+                    "Emoji personalizado invalido. Use o formato `<:nome:id>` ou `<a:nome:id>`.",
+                    ephemeral=True,
+                )
+                return
+
         gd = get_guild_data(self.guild_id)
         options = gd["ticket_config"].get("options", [])
         if len(options) >= 25:
             await interaction.response.send_message("Limite de 25 opcoes atingido.", ephemeral=True)
             return
-        options.append({"emoji": emoji, "label": nome})
+        options.append({"emoji": emoji_val, "label": nome})
         gd["ticket_config"]["options"] = options
         update_guild_data(self.guild_id, gd)
         embed = _build_ticket_config_embed(interaction.guild, gd)
