@@ -24,10 +24,11 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "yov!"
 EMBED_COLOR = 0x7c3aed
 DELETE_TIMEOUT = 10
-SPAM_LIMIT = 7
-SPAM_WINDOW = 5
+SPAM_LIMIT = 3
+SPAM_WINDOW = 1
 RAID_THRESHOLD = 5
 RAID_WINDOW = 10
+ANTI_FAKE_MIN_DAYS = 7
 BAN_LIMIT_RESET_DAYS = 7
 DISCONNECT_LIMIT = 3
 DISCONNECT_WINDOW = 60
@@ -56,6 +57,8 @@ DEFAULT_ANTIRAID = {
     "anti_gore": False,
     "anti_raid": True,
     "anti_disconnect": True,
+    "anti_link": False,
+    "anti_fake": False,
 }
 
 # ─── PostgreSQL helpers ───────────────────────────────────────────────────────
@@ -273,6 +276,11 @@ def _apply_guild_defaults(gd: dict):
     for k, v in DEFAULT_ANTIRAID.items():
         if k not in ar:
             ar[k] = v
+            changed = True
+    # Garante novos campos anti_link e anti_fake
+    for nk, nv in [("anti_link", False), ("anti_fake", False)]:
+        if nk not in ar:
+            ar[nk] = nv
             changed = True
     tc = gd.setdefault("ticket_config", {})
     for tk, tv in [
@@ -1396,14 +1404,16 @@ def build_antiraid_embed(guild):
     ar = gd.get("antiraid_settings", dict(DEFAULT_ANTIRAID))
 
     def status(key):
-        return "Ativado" if ar.get(key, DEFAULT_ANTIRAID[key]) else "Desativado"
+        return "✅ Ativado" if ar.get(key, DEFAULT_ANTIRAID.get(key, False)) else "❌ Desativado"
 
     embed = create_embed(guild, "Painel Anti-Raid")
     embed.description = (
         "Configure os modulos de protecao do servidor.\n"
         "Todas as protecoes so atuam em membros com cargo **inferior ao bot**.\n\n"
-        f"**Anti-Spam:** {status('anti_spam')}\n"
+        f"**Anti-Spam** (5 msg/seg): {status('anti_spam')}\n"
         f"**Anti-Gore:** {status('anti_gore')}\n"
+        f"**Anti-Link:** {status('anti_link')}\n"
+        f"**Anti-Fake** (contas <{ANTI_FAKE_MIN_DAYS} dias): {status('anti_fake')}\n"
         f"**Anti-Raid:** {status('anti_raid')}\n"
         f"**Anti-Disconnect:** {status('anti_disconnect')}\n\n"
         f"Anti-Spam: bloqueia mensagens em rafaga ({SPAM_LIMIT} em {SPAM_WINDOW}s)\n"
@@ -1415,7 +1425,7 @@ def build_antiraid_embed(guild):
 
 class AntiRaidPanelView(discord.ui.View):
     def __init__(self, owner_id, guild):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.owner_id = owner_id
         self.guild = guild
         self._update_buttons()
@@ -1450,6 +1460,14 @@ class AntiRaidPanelView(discord.ui.View):
     @discord.ui.button(label="Anti-Gore", custom_id="toggle_anti_gore", style=discord.ButtonStyle.danger, row=0)
     async def toggle_gore(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._toggle_and_update(interaction, "anti_gore")
+
+    @discord.ui.button(label="Anti-Link", custom_id="toggle_anti_link", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._toggle_and_update(interaction, "anti_link")
+
+    @discord.ui.button(label="Anti-Fake", custom_id="toggle_anti_fake", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_fake(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._toggle_and_update(interaction, "anti_fake")
 
     @discord.ui.button(label="Anti-Raid", custom_id="toggle_anti_raid", style=discord.ButtonStyle.success, row=1)
     async def toggle_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1743,6 +1761,25 @@ async def on_message(message):
                     if isinstance(message.author, discord.Member) and _tem_permissao_cl(message.author, gd_msg):
                         await _executar_cl(message, gd_msg)
                     return
+        # ── Anti-Link ──
+        ar_settings = gd_msg.get("antiraid_settings", {})
+        if ar_settings.get("anti_link", False) and isinstance(message.author, discord.Member):
+            _URL_PATTERN = re.compile(r'(https?://|www\.)\S+', re.IGNORECASE)
+            if _URL_PATTERN.search(message.content):
+                bot_top = message.guild.me.top_role
+                if message.author.top_role < bot_top and message.author.id != message.guild.owner_id:
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    try:
+                        warn = await message.channel.send(
+                            f"{message.author.mention} Links nao sao permitidos neste servidor.",
+                            delete_after=6,
+                        )
+                    except Exception:
+                        pass
+                    return
         # ── Instagram: intercepta fotos no canal configurado ──
         if message.attachments:
             handled = await _handle_instagram_post(message)
@@ -1766,6 +1803,31 @@ async def on_member_join(member):
             )
             await send_log(member.guild, "bot_join", embed)
             return
+
+        # ── Anti-Fake: checa idade da conta ──
+        try:
+            gd_join = get_guild_data(member.guild.id)
+            ar_join = gd_join.get("antiraid_settings", {})
+            if ar_join.get("anti_fake", False):
+                account_age_days = (datetime.now(timezone.utc) - member.created_at).days
+                if account_age_days < ANTI_FAKE_MIN_DAYS:
+                    now_ts = int(datetime.now(timezone.utc).timestamp())
+                    try:
+                        await member.kick(reason=f"Anti-Fake: conta criada ha {account_age_days} dias (minimo: {ANTI_FAKE_MIN_DAYS})")
+                    except Exception:
+                        pass
+                    embed_fake = create_embed(member.guild, "Membro Removido — Anti-Fake")
+                    embed_fake.description = (
+                        f"**Usuario:** {member.mention} ({member.id})\n"
+                        f"**Conta criada:** <t:{int(member.created_at.timestamp())}:R> ({account_age_days} dias)\n"
+                        f"**Motivo:** Conta muito nova (minimo {ANTI_FAKE_MIN_DAYS} dias)\n"
+                        f"**Horario:** <t:{now_ts}:F>"
+                    )
+                    await send_log(member.guild, "ban", embed_fake)
+                    return
+        except Exception as e:
+            print(f"[ERRO] anti_fake: {e}", flush=True)
+
         embed = create_embed(member.guild, "Membro Entrou")
         embed.description = (
             f"**Usuario:** {member.mention} ({member.id})\n"
@@ -1821,17 +1883,42 @@ async def on_member_remove(member):
     try:
         if member.bot:
             return
-        for action in (discord.AuditLogAction.kick, discord.AuditLogAction.ban):
-            try:
-                async for entry in member.guild.audit_logs(action=action, limit=1):
-                    if entry.target.id == member.id:
-                        return
-            except Exception:
-                pass
+        now = int(datetime.now(timezone.utc).timestamp())
+
+        # Verifica se foi kick manual (nao pelo bot)
+        kick_actor = None
+        try:
+            async for entry in member.guild.audit_logs(action=discord.AuditLogAction.kick, limit=3):
+                if entry.target.id == member.id:
+                    kick_actor = entry.user
+                    break
+        except Exception:
+            pass
+
+        if kick_actor and kick_actor.id != bot.user.id:
+            # Rastrear kick no anti-raid
+            await track_raid_event(member.guild, "kick", discord.AuditLogAction.kick)
+            embed = create_embed(member.guild, "Membro Expulso (Manual)")
+            embed.description = (
+                f"**Usuario:** {member.mention} ({member.id})\n"
+                f"**Expulso por:** {kick_actor.mention} ({kick_actor.id})\n"
+                f"**Horario:** <t:{now}:F>"
+            )
+            await send_log(member.guild, "ban", embed)
+            return
+
+        # Verifica se foi ban (ja tratado no on_member_ban)
+        try:
+            async for entry in member.guild.audit_logs(action=discord.AuditLogAction.ban, limit=1):
+                if entry.target.id == member.id:
+                    return
+        except Exception:
+            pass
+
         embed = create_embed(member.guild, "Membro Saiu")
         embed.description = (
             f"**Usuario:** {member.mention} ({member.id})\n"
-            f"**Horario:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+            f"**Horario:** <t:{now}:F>"
         )
         await send_log(member.guild, "members", embed)
     except Exception as e:
@@ -2021,11 +2108,36 @@ async def on_guild_channel_delete(channel):
         if actor and actor.id == bot.user.id:
             return
         await track_raid_event(channel.guild, "channel_delete", discord.AuditLogAction.channel_delete)
+        now = int(datetime.now(timezone.utc).timestamp())
+        # Puni imediatamente quem deletou sem ter cargo suficiente
+        if actor:
+            actor_member = channel.guild.get_member(actor.id)
+            bot_top = channel.guild.me.top_role
+            if (actor_member and actor_member.top_role < bot_top
+                    and actor.id != channel.guild.owner_id
+                    and not actor_member.guild_permissions.administrator):
+                try:
+                    from datetime import timedelta as _timedelta
+                    await actor_member.timeout(
+                        discord.utils.utcnow() + _timedelta(minutes=10),
+                        reason="Anti-Raid: deletou canal sem permissao"
+                    )
+                except Exception:
+                    pass
+                warn_embed = create_embed(channel.guild, "⚠️ Canal Deletado — Acao Suspeita")
+                warn_embed.description = (
+                    f"**Canal:** #{channel.name} ({channel.id})\n"
+                    f"**Responsavel:** {actor.mention} ({actor.id})\n"
+                    f"**Acao:** Timeout de 10 min aplicado automaticamente\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+                await send_log(channel.guild, "channel_delete", warn_embed)
+                return
         embed = create_embed(channel.guild, "Canal Excluido")
         embed.description = (
             f"**Canal:** {channel.name} ({channel.id})\n"
             f"**Responsavel:** {f'{actor.mention} ({actor.id})' if actor else 'Desconhecido'}\n"
-            f"**Horario:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+            f"**Horario:** <t:{now}:F>"
         )
         await send_log(channel.guild, "channel_delete", embed)
     except Exception as e:
@@ -2068,11 +2180,36 @@ async def on_guild_role_delete(role):
         if actor and actor.id == bot.user.id:
             return
         await track_raid_event(role.guild, "role_delete", discord.AuditLogAction.role_delete)
+        now = int(datetime.now(timezone.utc).timestamp())
+        # Puni imediatamente quem deletou sem ter cargo suficiente
+        if actor:
+            actor_member = role.guild.get_member(actor.id)
+            bot_top = role.guild.me.top_role
+            if (actor_member and actor_member.top_role < bot_top
+                    and actor.id != role.guild.owner_id
+                    and not actor_member.guild_permissions.administrator):
+                try:
+                    from datetime import timedelta as _timedelta
+                    await actor_member.timeout(
+                        discord.utils.utcnow() + _timedelta(minutes=10),
+                        reason="Anti-Raid: deletou cargo sem permissao"
+                    )
+                except Exception:
+                    pass
+                warn_embed = create_embed(role.guild, "⚠️ Cargo Deletado — Acao Suspeita")
+                warn_embed.description = (
+                    f"**Cargo:** @{role.name} ({role.id})\n"
+                    f"**Responsavel:** {actor.mention} ({actor.id})\n"
+                    f"**Acao:** Timeout de 10 min aplicado automaticamente\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+                await send_log(role.guild, "role_delete", warn_embed)
+                return
         embed = create_embed(role.guild, "Cargo Excluido")
         embed.description = (
             f"**Cargo:** {role.name} ({role.id})\n"
             f"**Responsavel:** {f'{actor.mention} ({actor.id})' if actor else 'Desconhecido'}\n"
-            f"**Horario:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+            f"**Horario:** <t:{now}:F>"
         )
         await send_log(role.guild, "role_delete", embed)
     except Exception as e:
@@ -2376,7 +2513,7 @@ async def ban(ctx, member: discord.Member = None, *, reason="Sem motivo informad
         await member.ban(reason=reason)
     except discord.Forbidden:
         return await reply_and_delete(ctx, error_embed("Sem permissao para banir este usuario.", ctx.guild))
-    embed = create_embed(ctx.guild, "Membro Banido")
+    embed = create_embed(ctx.guild, "Membro Banido via Comando")
     embed.description = (
         f"**Usuario:** {member.mention} ({member.id})\n"
         f"**Moderador:** {ctx.author.mention} ({ctx.author.id})\n"
@@ -2397,7 +2534,7 @@ async def kick(ctx, member: discord.Member = None, *, reason="Sem motivo informa
         await member.kick(reason=reason)
     except discord.Forbidden:
         return await reply_and_delete(ctx, error_embed("Sem permissao para expulsar este usuario.", ctx.guild))
-    embed = create_embed(ctx.guild, "Membro Expulso")
+    embed = create_embed(ctx.guild, "Membro Expulso via Comando")
     embed.description = (
         f"**Usuario:** {member.mention} ({member.id})\n"
         f"**Moderador:** {ctx.author.mention} ({ctx.author.id})\n"
@@ -7057,7 +7194,7 @@ async def set_insta_canal(ctx, canal: discord.TextChannel = None):
     gd = get_guild_data(ctx.guild.id)
     gd.setdefault("instagram_config", {})["channel_id"] = canal.id
     update_guild_data(ctx.guild.id, gd)
-    color = _get_embed_color(ctx.guild)
+    color = get_guild_color(ctx.guild)
     embed = discord.Embed(
         description=f"✅ Canal de fotos definido para {canal.mention}.",
         color=color,
@@ -7077,7 +7214,7 @@ async def set_insta_cargo(ctx, cargo: discord.Role = None):
     gd = get_guild_data(ctx.guild.id)
     gd.setdefault("instagram_config", {})["role_id"] = cargo.id
     update_guild_data(ctx.guild.id, gd)
-    color = _get_embed_color(ctx.guild)
+    color = get_guild_color(ctx.guild)
     embed = discord.Embed(
         description=f"✅ Cargo para postar fotos definido: {cargo.mention}.",
         color=color,
@@ -7097,7 +7234,7 @@ async def insta_status(ctx):
     ch_id = ic.get("channel_id")
     ro_id = ic.get("role_id")
     posts_count = len(gd.get("instagram_posts", {}))
-    color = _get_embed_color(ctx.guild)
+    color = get_guild_color(ctx.guild)
     embed = discord.Embed(title="📷 Instagram — Status", color=color)
     embed.add_field(
         name="Canal",
